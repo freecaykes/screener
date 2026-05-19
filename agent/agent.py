@@ -1,5 +1,6 @@
 import asyncio
 import os
+from enum import Enum
 
 import pandas as pd
 import pandas_ta as ta
@@ -13,14 +14,26 @@ from typing_extensions import TypedDict, Optional, Any
 
 import train.train
 
+
+class Signal(Enum):
+    STRONG_SELL = 0,
+    SELL = 1,
+    HOLD = 2,
+    BUY = 3,
+    STRONG_BUY = 4
+
+
 class AgentState(TypedDict):
     ticker: str
     news: list[dict]
-    headline: str
+    headlines: list[str]
     price_data: Optional[pd.DataFrame]
     indicators: dict
     sentiment_score: float
     predicted_delta: float
+    signal: str
+    signal_confidence: float
+    signal_score: float
 
 
 class TickerAgent:
@@ -41,16 +54,16 @@ class TickerAgent:
         print(f"   Provider: {provider}")
 
         self.newsLimit = newsLimit
-        
+
         # Determine the correct API key parameter based on provider
         kwargs = {
             "model": model,
             "temperature": temp,
         }
-        
+
         if provider:
             kwargs["model_provider"] = provider
-        
+
         if provider == "google_genai":
             kwargs["google_api_key"] = api_key
         elif provider == "openai":
@@ -69,13 +82,15 @@ class TickerAgent:
         workflow.add_node("compute_indicators", self._compute_indicators)
         workflow.add_node("sentiment_analysis", self._sentiment_analysis)
         workflow.add_node("xgboost_predict", self._xgboost_predict)
+        workflow.add_node("generate_signal", self._generate_signal)
 
         workflow.add_edge(START, "fetch_news")
         workflow.add_edge("fetch_news", "extract_headline")
         workflow.add_edge("extract_headline", "compute_indicators")
         workflow.add_edge("compute_indicators", "sentiment_analysis")
         workflow.add_edge("sentiment_analysis", "xgboost_predict")
-        workflow.add_edge("xgboost_predict", END)
+        workflow.add_edge("xgboost_predict", "generate_signal")
+        workflow.add_edge("generate_signal", END)
 
         self.workflow = workflow
         self.app = self.workflow.compile()
@@ -100,16 +115,14 @@ class TickerAgent:
         return state
 
     async def _extract_headline(self, state: AgentState) -> AgentState:
+        # TODO fix news for multiple sources
         print(f"  [node] extracting headline for {state['ticker']}...")
+        state["headlines"] = []
         if state["news"]:
-            headline = state["news"][0].get("title") or state["news"][0].get("content", "No headline found")
-            if isinstance(headline, dict):
-                headline = headline.get("description", "No headline found")
-            state["headline"] = str(headline).strip()
-        else:
-            state["headline"] = "No recent news found"
-        return state
+            for news in state["news"]:
+                state["headlines"].append(str(news.get("content").get("summary").strip()))
 
+        return state
 
     async def _compute_indicators(self, state: AgentState) -> AgentState:
         ticker_obj = yf.Ticker(state["ticker"])
@@ -139,21 +152,19 @@ class TickerAgent:
         }
         return state
 
-
-
     async def _sentiment_analysis(self, state: AgentState) -> AgentState:
         print(f"  [node] sentiment analysis for {state['ticker']}...")
-        if not state.get("headline") or state["headline"] == "No recent news found":
+        if not state.get("headlines") or len(state["headlines"]) == 0:
             state["sentiment_score"] = 0.0
             return state
 
         prompt = f"""
         You are a professional financial sentiment analyst.
-        Analyze ONLY the impact of this headline on the stock price of {state["ticker"]}.
+        Analyze ONLY the impact of these headlines separated by ',' on the stock price of {state["ticker"]}.
         Return a single number between -1.0 (strongly negative) and +1.0 (strongly positive).
         Do not explain — just the number.
     
-        Headline: {state["headline"]}
+        Headlines: {str(','.join(state["headlines"])).strip()}
         """
 
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
@@ -167,7 +178,6 @@ class TickerAgent:
 
         state["sentiment_score"] = score
         return state
-
 
     async def _xgboost_predict(self, state: AgentState) -> AgentState:
         print(f"  [node] XGBoost prediction for {state['ticker']}...")
@@ -186,7 +196,7 @@ class TickerAgent:
             "BBB_20_2.0",
             "BBM_20_2.0"
         ]
-        
+
         feat_values = {
             "sentiment_score": state["sentiment_score"],
             "RSI_14": ind.get("RSI_14", 50.0),
@@ -206,4 +216,51 @@ class TickerAgent:
         state["predicted_delta"] = round(float(pred), 4)
         return state
 
+    async def _generate_signal(self, state: AgentState) -> AgentState:
+        """
+        Clean weighted scoring system for generating trading signals.
+        """
+        delta = state["predicted_delta"]  # XGBoost predicted % move
+        sentiment = state["sentiment_score"]
+        vix = state["indicators"].get("vix_current", 20.0)
+        pullback = bool(state["indicators"].get("pullback_buy_setup", 0))
 
+        # ====================== WEIGHTED SCORING ======================
+        score = 0.0
+
+        # Core components with tunable weights
+        score += delta * 0.50  # XGBoost prediction has highest weight
+        score += sentiment * 0.30  # Sentiment from LLM
+        score += (1 if pullback else -0.4) * 0.15  # Pullback setup bonus/penalty
+        score -= (vix - 18) * 0.012  # High VIX penalty (fear reduces conviction)
+
+        # Optional: Add momentum bonus
+        rsi = state["indicators"].get("RSI_14", 50)
+        if 45 < rsi < 65:  # Healthy momentum zone during pullback
+            score += 0.25
+
+        # ====================== SIGNAL MAPPING ======================
+        if score >= 1.85:
+            signal = "STRONG BUY"
+            confidence = min(0.92, 0.45 + score * 0.18)
+        elif score >= 0.95:
+            signal = "BUY"
+            confidence = min(0.82, 0.40 + score * 0.22)
+        elif score >= 0.25:
+            signal = "BUY"
+            confidence = min(0.68, 0.35 + score * 0.20)
+        elif score >= -0.35:
+            signal = "HOLD"
+            confidence = 0.75
+        elif score >= -1.1:
+            signal = "SELL"
+            confidence = min(0.78, 0.45 + abs(score) * 0.22)
+        else:
+            signal = "STRONG SELL"
+            confidence = min(0.90, 0.50 + abs(score) * 0.20)
+
+        state["signal"] = signal
+        state["signal_confidence"] = round(float(confidence), 2)
+        state["signal_score"] = round(float(score), 3)  # Useful for debugging
+
+        return state

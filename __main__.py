@@ -24,8 +24,7 @@ from agent.agent import TickerAgent
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-TICKERS = ["NVDA"]   # ← Add/remove anytime
-
+TICKERS = ["UBER", "ELF", "CELH", "AMD", "NVDA", "INTC"]
 # =============================================================================
 # CONCURRENT TICKER PROCESSOR (with semaphore)
 # =============================================================================
@@ -34,23 +33,26 @@ NEWS_POLL_INTERVAL_SEC = 5
 LAST_HEADLINES: dict[str, str] = {}
 MAX_CONCURRENT = 5
 
-async def consumer(id: int, ticker_agent: TickerAgent):
 
+async def consumer(id: int, ticker_agent: TickerAgent):
     while True:
         ticker = await QUEUE.get()
-        start = time.time()
         try:
             print(f"🔧 Worker {id} started processing {ticker}")
             result = await ticker_agent.run(ticker)
 
-            print(f"✅ PROCESSED {ticker} | "
-                  f"Sentiment: {result['sentiment_score']:.2f} | "
-                  f"XGBoost Δ: {result['predicted_delta']:+.2f}% "
-                  f"({time.time()-start:.1f}s)")
+            print(f"\n🔥 {ticker} @ {time.strftime('%H:%M:%S')}")
+            print(f"   Headline : {result.get('headlines', '')[:100]}...")
+            print(f"   Sentiment: {result['sentiment_score']:.2f}")
+            print(f"   XGBoost Δ: {result['predicted_delta']:+.2f}%")
+            print(f"   VIX      : {result['indicators'].get('vix_current', 'N/A')}")
+            print(f"   Pullback : {'Yes' if result['indicators'].get('pullback_buy_setup') else 'No'}")
+            print(f"   Signal   : **{result['signal']}** (Confidence: {result['signal_confidence']:.2f})")
         except Exception as e:
             print(f"❌ Error processing {ticker}: {e}")
         finally:
             QUEUE.task_done()
+
 
 async def news_source():
     global QUEUE
@@ -74,7 +76,7 @@ async def news_source():
 
 async def main():
     train.xgboost(TICKERS)
-    ticker_agent =  TickerAgent("gemini-2.5-flash", 0.0)
+    ticker_agent = TickerAgent("gemini-2.5-flash", 0.0)
 
     consumers = [
         asyncio.create_task(consumer(i, ticker_agent))

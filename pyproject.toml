@@ -5,9 +5,9 @@ description = "Multi-provider LangGraph agent for real-time stock news sentiment
 authors = [
     { name = "freecaykes", email = "ecandra@protonmail.com" }
 ]
-readme = "README.md"
+#readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+#license = { text = "MIT" }
 keywords = ["langgraph", "stock-market", "sentiment-analysis", "xgboost", "llm", "finance"]
 
 dependencies = [
@@ -23,7 +23,7 @@ dependencies = [
     "pandas-ta>=0.4.71b0",
     "xgboost>=2.1.0",
     "joblib>=1.3.0",
-    "numpy>=2.26.0",
+    "numpy>=2.2.6",
     "asyncio>=3.4.3", # Usually already in stdlib, but safe
     "scikit-learn>=1.5.0"
 ]
@@ -55,6 +55,9 @@ ignore = ["E501"]
 minversion = "8.0"
 addopts = "-ra -q"
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["agent", "train"]
 
 [project.scripts]
 stock-agent = "main:main"   # Will run `asyncio.run(main())` if you create main.py

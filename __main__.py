@@ -18,13 +18,13 @@ import time
 
 import yfinance as yf
 
-import train.train
+import train
 from agent.agent import TickerAgent
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-TICKERS = ["UBER", "ELF", "CELH", "AMD", "NVDA", "INTC"]
+TICKERS = ["ELF", "CELH"]
 # =============================================================================
 # CONCURRENT TICKER PROCESSOR (with semaphore)
 # =============================================================================

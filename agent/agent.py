@@ -12,8 +12,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from typing_extensions import TypedDict, Optional, Any
 
-import train.train
-
+import train
 
 class Signal(Enum):
     STRONG_SELL = 0,
@@ -124,6 +123,7 @@ class TickerAgent:
 
         return state
 
+
     async def _compute_indicators(self, state: AgentState) -> AgentState:
         ticker_obj = yf.Ticker(state["ticker"])
         df: pd.DataFrame = ticker_obj.history(period="60d")
@@ -133,23 +133,41 @@ class TickerAgent:
             return state
 
         # Trend + Momentum + Volatility (same as training)
-        df["EMA_20"] = ta.ema(df["Close"], length=20)
+        df["EMA_21"] = ta.ema(df["Close"], length=21)
+        df["EMA_50"] = ta.ema(df["Close"], length=50)
         df["RSI_14"] = ta.rsi(df["Close"], length=14)
         macd = ta.macd(df["Close"], fast=12, slow=26, signal=9)
         df = pd.concat([df, macd], axis=1)
         bb = ta.bbands(df["Close"], length=20, std=2)
         df = pd.concat([df, bb], axis=1)
 
+        try:
+            vix_df = yf.Ticker("^VIX").history(period="5d")
+            vix_current = float(vix_df["Close"].iloc[-1]) if not vix_df.empty else 20.0
+        except:
+            vix_current = 20.0
+
         latest = df.iloc[-1]
+        close = float(latest["Close"])
 
         state["price_data"] = df
         state["indicators"] = {
             "RSI_14": float(latest["RSI_14"]) if pd.notna(latest["RSI_14"]) else 50.0,
+            "EMA_21": float(latest.get("EMA_21", close)),
+            "EMA_50": float(latest.get("EMA_50", close)),
             "MACD_12_26_9": float(latest["MACD_12_26_9"]) if pd.notna(latest.get("MACD_12_26_9")) else 0.0,
             "MACDs_12_26_9": float(latest.get("MACDs_12_26_9", 0)) if pd.notna(latest.get("MACDs_12_26_9")) else 0.0,
             "BBM_20_2.0": float(latest["BBM_20_2.0"]) if pd.notna(latest.get("BBM_20_2.0")) else 100.0,
             "BBB_20_2.0": float(latest["BBB_20_2.0"]) if pd.notna(latest.get("BBB_20_2.0")) else 0.02,
+            "price_to_ema21": close / float(latest.get("EMA_21", close)) if latest.get("EMA_21") else 1.0,
+            "vix_current": vix_current,
         }
+
+        # Simple pullback flag (for optional filtering)
+        in_uptrend = close > float(latest.get("EMA_50", close))
+        near_ema_pullback = 0.98 < state["indicators"]["price_to_ema21"] < 1.02
+        state["indicators"]["pullback_buy_setup"] = 1 if in_uptrend and near_ema_pullback else 0
+
         return state
 
     async def _sentiment_analysis(self, state: AgentState) -> AgentState:
@@ -162,6 +180,7 @@ class TickerAgent:
         You are a professional financial sentiment analyst.
         Analyze ONLY the impact of these headlines separated by ',' on the stock price of {state["ticker"]}.
         Return a single number between -1.0 (strongly negative) and +1.0 (strongly positive).
+        Given the current VIX indicator is at {state["indicators"]["vix_current"]}
         Do not explain — just the number.
     
         Headlines: {str(','.join(state["headlines"])).strip()}
@@ -181,20 +200,23 @@ class TickerAgent:
 
     async def _xgboost_predict(self, state: AgentState) -> AgentState:
         print(f"  [node] XGBoost prediction for {state['ticker']}...")
-        if train.train.MODEL is None:
+        if train.MODEL is None:
             state["predicted_delta"] = 0.0
             return state
 
         ind = state["indicators"]
-        # Use a list to ensure order matches training exactly
+        
         feature_cols = [
             "sentiment_score",
+            "pullback_buy_setup",
+            "EMA_21"
             "RSI_14",
             "price_to_ema21",
             "MACD_12_26_9",
             "MACDs_12_26_9",
             "BBB_20_2.0",
-            "BBM_20_2.0"
+            "BBM_20_2.0",
+            "vix_current",
         ]
 
         feat_values = {
@@ -205,12 +227,13 @@ class TickerAgent:
             "MACDs_12_26_9": ind.get("MACDs_12_26_9", 0.0),
             "BBB_20_2.0": ind.get("BBB_20_2.0", 0.02),
             "BBM_20_2.0": ind.get("BBM_20_2.0", 100.0),
+            "vix_current": ind.get("vix_current", -1),
         }
 
         def _predict():
             # Create DataFrame with explicit column order
             X = pd.DataFrame([[feat_values[col] for col in feature_cols]], columns=feature_cols)
-            return train.train.MODEL.predict(X)[0]
+            return train.MODEL.predict(X)[0]
 
         pred = await asyncio.to_thread(_predict)
         state["predicted_delta"] = round(float(pred), 4)
@@ -222,7 +245,7 @@ class TickerAgent:
         """
         delta = state["predicted_delta"]  # XGBoost predicted % move
         sentiment = state["sentiment_score"]
-        vix = state["indicators"].get("vix_current", 20.0)
+        vix = state["indicators"].get("vix_current", -1)
         pullback = bool(state["indicators"].get("pullback_buy_setup", 0))
 
         # ====================== WEIGHTED SCORING ======================

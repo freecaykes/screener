@@ -68,11 +68,33 @@ def xgboost(tickers: list[str]) -> XGBRegressor:
             })
             df = df.rename(columns=bb_map)
 
-        # Drop NaNs after all indicators are computed
-        df = df.dropna()
+        # === VIX - SAFER JOIN ===
+        vix_df = yf.download("^VIX", period="2y", progress=False)
+
+        # Flatten any MultiIndex columns (common cause of the error)
+        if isinstance(vix_df.columns, pd.MultiIndex):
+            vix_df.columns = vix_df.columns.get_level_values(0)
+
+        vix_df = vix_df[['Close']].rename(columns={'Close': 'vix_current'})
+
+        # Reset indexes to avoid level mismatch
+        df = df.reset_index()
+        vix_df = vix_df.reset_index()
+
+        # Merge on Date
+        df = df.merge(vix_df[['Date', 'vix_current']], on='Date', how='left')
+
+        # Forward fill VIX (markets are closed on different days sometimes)
+        df["vix_current"] = df["vix_current"].ffill()
+
+        # Cleanup
+        df = df.dropna().reset_index(drop=True)
+        df = df.apply(pd.to_numeric, errors='coerce').fillna(0.0).astype('float32')
 
         # Dummy features (only sentiment_score)
         df["sentiment_score"] = np.random.uniform(-1.0, 1.0, len(df))
+        df["pullback_buy_setup"] = ((df["Close"] > df["EMA_21"] * 0.97) &
+                                    (df["Close"] < df["EMA_21"] * 1.03)).astype('float32')
 
         df["target_delta"] = (close_series.shift(-1) - close_series) / close_series * 100
         df = df.dropna().reset_index(drop=True)
@@ -83,12 +105,15 @@ def xgboost(tickers: list[str]) -> XGBRegressor:
         # Feature columns - EXPLICIT LIST
         feature_cols = [
             "sentiment_score",
+            "pullback_buy_setup",
+            "EMA_21"
             "RSI_14",
             "price_to_ema21",
             "MACD_12_26_9",
             "MACDs_12_26_9",
             "BBB_20_2.0",
-            "BBM_20_2.0"
+            "BBM_20_2.0",
+            "vix_current",
         ]
 
         # Verify all columns exist

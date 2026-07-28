@@ -18,18 +18,18 @@ import time
 
 import yfinance as yf
 
-import train
+import train.train
 from agent.agent import TickerAgent
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-TICKERS = ["ELF", "CELH"]
+TICKERS = ["NOW"]
 # =============================================================================
 # CONCURRENT TICKER PROCESSOR (with semaphore)
 # =============================================================================
 QUEUE: asyncio.Queue = asyncio.Queue()
-NEWS_POLL_INTERVAL_SEC = 5
+NEWS_POLL_INTERVAL_SEC = 300
 LAST_HEADLINES: dict[str, str] = {}
 MAX_CONCURRENT = 5
 

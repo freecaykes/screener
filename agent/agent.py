@@ -1,4 +1,3 @@
-import asyncio
 import os
 from enum import Enum
 
@@ -12,7 +11,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from typing_extensions import TypedDict, Optional, Any
 
-import train
+from train import train
+
 
 class Signal(Enum):
     STRONG_SELL = 0,
@@ -123,7 +123,6 @@ class TickerAgent:
 
         return state
 
-
     async def _compute_indicators(self, state: AgentState) -> AgentState:
         ticker_obj = yf.Ticker(state["ticker"])
         df: pd.DataFrame = ticker_obj.history(period="60d")
@@ -147,19 +146,18 @@ class TickerAgent:
         except:
             vix_current = 20.0
 
-        latest = df.iloc[-1]
+        latest = df.dropna().iloc[-1]
         close = float(latest["Close"])
 
         state["price_data"] = df
         state["indicators"] = {
             "RSI_14": float(latest["RSI_14"]) if pd.notna(latest["RSI_14"]) else 50.0,
             "EMA_21": float(latest.get("EMA_21", close)),
-            "EMA_50": float(latest.get("EMA_50", close)),
+            "price_to_ema21": close / float(latest.get("EMA_21", close)) if latest.get("EMA_21") else 1.0,
             "MACD_12_26_9": float(latest["MACD_12_26_9"]) if pd.notna(latest.get("MACD_12_26_9")) else 0.0,
             "MACDs_12_26_9": float(latest.get("MACDs_12_26_9", 0)) if pd.notna(latest.get("MACDs_12_26_9")) else 0.0,
             "BBM_20_2.0": float(latest["BBM_20_2.0"]) if pd.notna(latest.get("BBM_20_2.0")) else 100.0,
             "BBB_20_2.0": float(latest["BBB_20_2.0"]) if pd.notna(latest.get("BBB_20_2.0")) else 0.02,
-            "price_to_ema21": close / float(latest.get("EMA_21", close)) if latest.get("EMA_21") else 1.0,
             "vix_current": vix_current,
         }
 
@@ -177,8 +175,8 @@ class TickerAgent:
             return state
 
         prompt = f"""
-        You are a professional financial sentiment analyst.
-        Analyze ONLY the impact of these headlines separated by ',' on the stock price of {state["ticker"]}.
+        Analyze ONLY the impact of these headlines separated by ',' on the stock price of {state["ticker"]} given the 
+        following indicator values {state} 
         Return a single number between -1.0 (strongly negative) and +1.0 (strongly positive).
         Given the current VIX indicator is at {state["indicators"]["vix_current"]}
         Do not explain — just the number.
@@ -199,44 +197,34 @@ class TickerAgent:
         return state
 
     async def _xgboost_predict(self, state: AgentState) -> AgentState:
-        print(f"  [node] XGBoost prediction for {state['ticker']}...")
-        if train.MODEL is None:
+
+        if train.get_model() is None:
             state["predicted_delta"] = 0.0
             return state
 
         ind = state["indicators"]
-        
-        feature_cols = [
-            "sentiment_score",
-            "pullback_buy_setup",
-            "EMA_21"
-            "RSI_14",
-            "price_to_ema21",
-            "MACD_12_26_9",
-            "MACDs_12_26_9",
-            "BBB_20_2.0",
-            "BBM_20_2.0",
-            "vix_current",
-        ]
 
-        feat_values = {
-            "sentiment_score": state["sentiment_score"],
-            "RSI_14": ind.get("RSI_14", 50.0),
-            "price_to_ema21": ind.get("price_to_ema21", 1.0),
-            "MACD_12_26_9": ind.get("MACD_12_26_9", 0.0),
-            "MACDs_12_26_9": ind.get("MACDs_12_26_9", 0.0),
-            "BBB_20_2.0": ind.get("BBB_20_2.0", 0.02),
-            "BBM_20_2.0": ind.get("BBM_20_2.0", 100.0),
-            "vix_current": ind.get("vix_current", -1),
+        feat_dict = {
+            "sentiment_score": float(state["sentiment_score"]),
+            "RSI_14": float(ind.get("RSI_14", 50.0)),
+            "price_to_ema21": float(ind.get("price_to_ema21", 1.0)),
+            "pullback_buy_setup": float(ind.get("pullback_buy_setup", 0)),
+            "vix_current": float(ind.get("vix_current", 20.0)),
         }
 
-        def _predict():
-            # Create DataFrame with explicit column order
-            X = pd.DataFrame([[feat_values[col] for col in feature_cols]], columns=feature_cols)
-            return train.MODEL.predict(X)[0]
+        # Add other technicals if available
+        for col in ["MACD_12_26_9", "MACDs_12_26_9", "BBB_20_2.0", "BBM_20_2.0"]:
+            if col in ind:
+                feat_dict[col] = float(ind[col])
 
-        pred = await asyncio.to_thread(_predict)
-        state["predicted_delta"] = round(float(pred), 4)
+        X = pd.DataFrame([feat_dict])
+
+        raw_pred = train.get_model().predict(X)[0]
+        state["predicted_delta"] = round(float(raw_pred), 4)
+
+        # Debug print (remove later)
+        print(f"DEBUG [{state['ticker']}] Raw XGBoost output: {raw_pred:.4f}")
+
         return state
 
     async def _generate_signal(self, state: AgentState) -> AgentState:

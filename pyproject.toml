@@ -17,6 +17,7 @@ dependencies = [
     "langchain-openai>=0.2.0",
     "langchain-anthropic>=0.3.0",
     "langchain-google-genai>=2.0.0",
+    "langchain-google-vertexai>=3.2.0",
     "langchain-xai>=0.1.0", # For Grok / xAI
     "yfinance>=0.2.40",
     "pandas>=2.2.0",

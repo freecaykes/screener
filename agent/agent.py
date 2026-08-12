@@ -185,11 +185,12 @@ class TickerAgent:
         """
 
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-        content = response.content.strip()
+        content = response.content[0].get("text").strip()
 
         try:
             score = float("".join(c for c in content if c.isdigit() or c in ".-"))
             score = max(min(score, 1.0), -1.0)
+            print("score", score)
         except ValueError:
             score = 0.0
 
@@ -197,6 +198,7 @@ class TickerAgent:
         return state
 
     async def _xgboost_predict(self, state: AgentState) -> AgentState:
+        print("_xgboost_predict")
 
         if train.get_model() is None:
             state["predicted_delta"] = 0.0
@@ -228,6 +230,7 @@ class TickerAgent:
         return state
 
     async def _generate_signal(self, state: AgentState) -> AgentState:
+        print("_generate_signal")
         """
         Clean weighted scoring system for generating trading signals.
         """

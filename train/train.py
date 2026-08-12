@@ -94,8 +94,16 @@ def xgboost(tickers: list[str]) -> XGBRegressor:
         df = df.dropna().reset_index(drop=True)
 
         feature_cols = [
-            "sentiment_score", "RSI_14", "price_to_ema21",
-            "pullback_buy_setup", "vix_current"
+            "sentiment_score",
+            "pullback_buy_setup",
+            "EMA_21",
+            "RSI_14",
+            "price_to_ema21",
+            "MACD_12_26_9",
+            "MACDs_12_26_9",
+            "BBB_20_2.0",
+            "BBM_20_2.0",
+            "vix_current",
         ]
 
         for col in ["MACD_12_26_9", "MACDs_12_26_9", "BBB_20_2.0", "BBM_20_2.0"]:

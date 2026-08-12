@@ -1,22 +1,7 @@
-# =============================================================================
-# MULTI-TICKER ASYNCIO AGENT — LOW CPU / MEMORY (Recommended)
-# =============================================================================
-# pip install yfinance langgraph langchain langchain-openai pandas pandas_ta xgboost joblib
-#
-# This version uses:
-#   • asyncio + Semaphore (max 5 concurrent analyses)
-#   • No per-ticker threads
-#   • Blocking calls wrapped in asyncio.to_thread
-#   • Async LLM calls
-#   • In-memory cache for last headline (avoids duplicate work)
-#
-# Much lighter on CPU & memory than threading!
-# =============================================================================
-
-import asyncio
 import time
 
 import yfinance as yf
+import asyncio
 
 import train.train
 from agent.agent import TickerAgent

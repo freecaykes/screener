@@ -10,5 +10,14 @@
 /dataSources.local.xml
 
 **/**/*.pkl
+**/**/*_key.txt
+
+**/**/__pycache__
 
 /.idea
+/.env
+/.vscode
+/bin
+/lib
+/lib64
+/quantz.egg-info

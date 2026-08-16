@@ -152,13 +152,13 @@ class TickerAgent:
         state["price_data"] = df
         state["indicators"] = {
             "RSI_14": float(latest["RSI_14"]) if pd.notna(latest["RSI_14"]) else 50.0,
-            "EMA_21": float(latest.get("EMA_21", close)),
             "price_to_ema21": close / float(latest.get("EMA_21", close)) if latest.get("EMA_21") else 1.0,
+            "vix_current": vix_current,
             "MACD_12_26_9": float(latest["MACD_12_26_9"]) if pd.notna(latest.get("MACD_12_26_9")) else 0.0,
             "MACDs_12_26_9": float(latest.get("MACDs_12_26_9", 0)) if pd.notna(latest.get("MACDs_12_26_9")) else 0.0,
-            "BBM_20_2.0": float(latest["BBM_20_2.0"]) if pd.notna(latest.get("BBM_20_2.0")) else 100.0,
-            "BBB_20_2.0": float(latest["BBB_20_2.0"]) if pd.notna(latest.get("BBB_20_2.0")) else 0.02,
-            "vix_current": vix_current,
+            "EMA_21": float(latest.get("EMA_21", close)),
+            # "BBM_20_2.0": float(latest["BBM_20_2.0"]) if pd.notna(latest.get("BBM_20_2.0")) else 100.0,
+            # "BBB_20_2.0": float(latest["BBB_20_2.0"]) if pd.notna(latest.get("BBB_20_2.0")) else 0.02,
         }
 
         # Simple pullback flag (for optional filtering)
@@ -208,14 +208,14 @@ class TickerAgent:
 
         feat_dict = {
             "sentiment_score": float(state["sentiment_score"]),
+            "pullback_buy_setup": float(ind.get("pullback_buy_setup", 0)),
             "RSI_14": float(ind.get("RSI_14", 50.0)),
             "price_to_ema21": float(ind.get("price_to_ema21", 1.0)),
-            "pullback_buy_setup": float(ind.get("pullback_buy_setup", 0)),
             "vix_current": float(ind.get("vix_current", 20.0)),
         }
 
         # Add other technicals if available
-        for col in ["MACD_12_26_9", "MACDs_12_26_9", "BBB_20_2.0", "BBM_20_2.0"]:
+        for col in ["MACD_12_26_9", "MACDs_12_26_9", "EMA_21"]:
             if col in ind:
                 feat_dict[col] = float(ind[col])
 

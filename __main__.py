@@ -61,7 +61,7 @@ async def news_source():
 
 async def main():
     train.xgboost(TICKERS)
-    ticker_agent = TickerAgent("gemini-2.5-flash", 0.0)
+    ticker_agent = TickerAgent("gemini-3.6-flash", 0.0)
 
     consumers = [
         asyncio.create_task(consumer(i, ticker_agent))

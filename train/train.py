@@ -4,6 +4,7 @@
 import os
 from typing import Optional
 
+import numpy as np
 import joblib
 import pandas as pd
 import pandas_ta as ta
@@ -33,18 +34,19 @@ def xgboost(tickers: list[str]) -> XGBRegressor:
     all_y = []
 
     # Download VIX once
-    vix_df = yf.download("^VIX", period="2y", progress=False)
+    vix_df = flatten_columns(yf.download("^VIX", period="2y", progress=False))
 
     # Force single level columns
     if isinstance(vix_df.columns, pd.MultiIndex):
-        vix_df.columns = vix_df.columns.get_level_values(0)
+        vix_df.columns = vix_df.columns.droplevel(1)
+
     vix_df = vix_df[['Close']].rename(columns={'Close': 'vix_current'})
     vix_df = vix_df.reset_index()  # Make sure it has 'Date' column
     vix_df['Date'] = pd.to_datetime(vix_df['Date'])
 
     for tkr in tickers:
         print(f"   → {tkr}")
-        df = yf.download(tkr, period="2y", progress=False)
+        df = flatten_columns(yf.download(tkr, period="2y", progress=False))
         if len(df) < 150:
             continue
 
@@ -96,19 +98,13 @@ def xgboost(tickers: list[str]) -> XGBRegressor:
         feature_cols = [
             "sentiment_score",
             "pullback_buy_setup",
-            "EMA_21",
             "RSI_14",
             "price_to_ema21",
+            "vix_current",
             "MACD_12_26_9",
             "MACDs_12_26_9",
-            "BBB_20_2.0",
-            "BBM_20_2.0",
-            "vix_current",
+            "EMA_21",
         ]
-
-        for col in ["MACD_12_26_9", "MACDs_12_26_9", "BBB_20_2.0", "BBM_20_2.0"]:
-            if col in df.columns:
-                feature_cols.append(col)
 
         X = df[feature_cols].copy()
         y = df["target_delta"].copy()
@@ -136,3 +132,9 @@ def xgboost(tickers: list[str]) -> XGBRegressor:
     joblib.dump(MODEL, model_path)
     print(f"✅ Model trained successfully! Features: {X_total.shape[1]}")
     return MODEL
+
+def flatten_columns(df):
+    if isinstance(df.columns, pd.MultiIndex):
+        # drop whichever level is the ticker/constant level
+        df.columns = df.columns.get_level_values(0)
+    return df

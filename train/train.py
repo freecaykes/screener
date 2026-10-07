@@ -1,140 +1,133 @@
 # =============================================================================
-# TRAIN / LOAD MODEL (same as before)
+# TRAIN / LOAD MODEL
+# =============================================================================
+# Changes vs the previous version:
+#   * sentiment_score is NOT a model feature any more (it was np.random noise in
+#     training). It still feeds the signal formula in agent._generate_signal.
+#   * Features come from train/features.py -- the same code the agent runs live,
+#     so train/serve skew (pullback definition, MACD units, ...) is gone.
+#   * Scale-dependent features (raw EMA_21, raw MACD) replaced by ratios.
+#   * Trains ONLY on the tickers passed to xgboost() with 10y of history (was 2y),
+#     one model per horizon, with purged walk-forward validation whose result
+#     gates the timing output.
+#   * No more `.fillna(0.0)` on indicators (that turned warm-up NaNs into fake
+#     RSI = 0 rows).
+#   * The cache file is versioned and stores the feature list AND the requested
+#     tickers, so a stale pickle (or one trained on different tickers) is retrained
+#     instead of silently loaded.
 # =============================================================================
 import os
 from typing import Optional
 
-import numpy as np
 import joblib
 import pandas as pd
-import pandas_ta as ta
-import yfinance as yf
 from xgboost import XGBRegressor
 
-MODEL: Optional[XGBRegressor] = None
+from train import features, timing
+
+TRAIN_PERIOD = "10y"
+MIN_ROWS_PER_TICKER = 300
+
+MODEL_PATH = "xgboost_bundle_v2.pkl"
+BUNDLE_VERSION = 2
+
+MODEL: Optional[XGBRegressor] = None   # the BASE_HORIZON model (what `predicted_delta` uses)
+BUNDLE: Optional[dict] = None          # models for all horizons + validation metrics
 
 
 def get_model() -> Optional[XGBRegressor]:
-    global MODEL
     return MODEL
 
 
-def xgboost(tickers: list[str]) -> XGBRegressor:
-    global MODEL
-    model_path = "xgboost_stock_delta_model.pkl"
+def get_bundle() -> Optional[dict]:
+    return BUNDLE
 
-    if os.path.exists(model_path):
-        print(f"✅ Loading existing model from {model_path}")
-        MODEL = joblib.load(model_path)
-        return MODEL
 
-    print("🚀 Training XGBoost model with VIX (Ultra Safe Version)...")
+def get_horizon_models() -> dict:
+    return BUNDLE["models"] if BUNDLE else {}
 
-    all_X = []
-    all_y = []
 
-    # Download VIX once
-    vix_df = flatten_columns(yf.download("^VIX", period="2y", progress=False))
+def build_dataset(tickers: list[str], period: Optional[str] = None) -> pd.DataFrame:
+    """Pooled frame: date, ticker, FEATURE_COLS, target_delta_* (one row per ticker-day)."""
+    period = period or TRAIN_PERIOD
+    vix = features.fetch_vix(period)
+    if vix.empty:
+        raise RuntimeError("Could not download ^VIX; refusing to train without it.")
 
-    # Force single level columns
-    if isinstance(vix_df.columns, pd.MultiIndex):
-        vix_df.columns = vix_df.columns.droplevel(1)
-
-    vix_df = vix_df[['Close']].rename(columns={'Close': 'vix_current'})
-    vix_df = vix_df.reset_index()  # Make sure it has 'Date' column
-    vix_df['Date'] = pd.to_datetime(vix_df['Date'])
-
+    frames = []
     for tkr in tickers:
-        print(f"   → {tkr}")
-        df = flatten_columns(yf.download(tkr, period="2y", progress=False))
-        if len(df) < 150:
+        try:
+            prices = features.fetch_history(tkr, period)
+            feats = features.build_features(prices, vix)
+        except Exception as e:  # network hiccup / bad symbol: skip, don't die
+            print(f"  ⚠️  {tkr}: skipped ({e})")
+            continue
+        if len(feats) < MIN_ROWS_PER_TICKER:
+            print(f"  ⚠️  {tkr}: only {len(feats)} usable rows, skipped")
             continue
 
-        # === INDICATORS ===
-        df["RSI_14"] = ta.rsi(df["Close"], length=14)
+        # Targets from the FULL close series so shift(-h) is real trading days.
+        targets = timing.add_horizon_targets(prices[["Close"]].copy()).drop(columns="Close")
+        feats = feats.join(targets)
+        feats["ticker"] = tkr
+        feats["date"] = feats.index
+        frames.append(feats.reset_index(drop=True))
+        print(f"  → {tkr}: {len(feats)} rows")
 
-        ema21 = ta.ema(df["Close"], length=21)
-        if isinstance(ema21, pd.DataFrame):
-            ema21 = ema21.iloc[:, 0]
-        df["EMA_21"] = ema21
-
-        df = df.dropna()
-        df["price_to_ema21"] = df["Close"] / df["EMA_21"]
-
-        macd = ta.macd(df["Close"], fast=12, slow=26, signal=9)
-        if isinstance(macd, pd.DataFrame) and not macd.empty:
-            df = pd.concat([df, macd], axis=1)
-
-        bb = ta.bbands(df["Close"], length=20, std=2)
-        if isinstance(bb, pd.DataFrame) and not bb.empty:
-            df = pd.concat([df, bb], axis=1)
-
-        # === SAFE VIX ALIGNMENT (No join/merge issues) ===
-        df = df.reset_index()
-        df['Date'] = pd.to_datetime(df['Date'])
-
-        # Merge with explicit column handling
-        df = pd.merge(
-            df,
-            vix_df[['Date', 'vix_current']],
-            on='Date',
-            how='left'
-        )
-
-        df["vix_current"] = df["vix_current"].ffill()
-
-        # Final cleanup
-        df = df.dropna().reset_index(drop=True)
-        df = df.apply(pd.to_numeric, errors='coerce').fillna(0.0).astype('float32')
-
-        # Features
-        df["sentiment_score"] = np.random.uniform(-1.0, 1.0, len(df))
-        df["pullback_buy_setup"] = ((df["Close"] > df["EMA_21"] * 0.97) &
-                                    (df["Close"] < df["EMA_21"] * 1.03)).astype('float32')
-
-        df["target_delta"] = (df["Close"].shift(-3) - df["Close"]) / df["Close"] * 100
-        df = df.dropna().reset_index(drop=True)
-
-        feature_cols = [
-            "sentiment_score",
-            "pullback_buy_setup",
-            "RSI_14",
-            "price_to_ema21",
-            "vix_current",
-            "MACD_12_26_9",
-            "MACDs_12_26_9",
-            "EMA_21",
-        ]
-
-        X = df[feature_cols].copy()
-        y = df["target_delta"].copy()
-
-        all_X.append(X)
-        all_y.append(y)
-
-    if not all_X:
+    if not frames:
         raise ValueError("No training data collected")
+    return pd.concat(frames, ignore_index=True)
 
-    X_total = pd.concat(all_X, ignore_index=True)
-    y_total = pd.concat(all_y, ignore_index=True)
 
-    MODEL = XGBRegressor(
-        n_estimators=600,
-        learning_rate=0.04,
-        max_depth=8,
-        subsample=0.85,
-        colsample_bytree=0.8,
-        random_state=42,
-        n_jobs=-1
-    )
-    MODEL.fit(X_total, y_total)
+def xgboost(tickers: list[str], force_retrain: bool = False) -> XGBRegressor:
+    global MODEL, BUNDLE
 
-    joblib.dump(MODEL, model_path)
-    print(f"✅ Model trained successfully! Features: {X_total.shape[1]}")
+    if not force_retrain and os.path.exists(MODEL_PATH):
+        cached = joblib.load(MODEL_PATH)
+        fresh = (
+            cached.get("version") == BUNDLE_VERSION
+            and cached.get("feature_cols") == features.FEATURE_COLS
+            and cached.get("horizons") == timing.HORIZONS
+            and cached.get("requested") == sorted(set(tickers))
+        )
+        if fresh:
+            BUNDLE = cached
+            MODEL = cached["models"][timing.BASE_HORIZON]
+            print(f"✅ Loaded model bundle from {MODEL_PATH} (trained through {cached['trained_through']})")
+            timing.print_validation(cached["metrics"])
+            return MODEL
+        print(f"⚠️  {MODEL_PATH} is stale (features, horizons or tickers changed) -> retraining")
+
+    print("🚀 Training multi-horizon XGBoost (shared features, no sentiment)...")
+    D = build_dataset(list(dict.fromkeys(tickers)))
+    print(f"   dataset: {len(D):,} rows, {D['ticker'].nunique()} tickers, "
+          f"{D['date'].min().date()} → {D['date'].max().date()}")
+
+    metrics = timing.walk_forward_validate(D, features.FEATURE_COLS)
+    timing.print_validation(metrics)
+
+    models = timing.fit_horizon_models(D, features.FEATURE_COLS)
+
+    BUNDLE = {
+        "version": BUNDLE_VERSION,
+        "feature_cols": list(features.FEATURE_COLS),
+        "horizons": list(timing.HORIZONS),
+        "models": models,
+        "metrics": metrics,
+        "trusted": timing.trusted_horizons(metrics),
+        "requested": sorted(set(tickers)),
+        "trained_on": sorted(D["ticker"].unique().tolist()),
+        "trained_through": str(D["date"].max().date()),
+    }
+    joblib.dump(BUNDLE, MODEL_PATH)
+    MODEL = models[timing.BASE_HORIZON]
+    print(f"✅ Trained {len(models)} horizon models on {len(features.FEATURE_COLS)} features. "
+          f"Saved to {MODEL_PATH}")
     return MODEL
 
+
 def flatten_columns(df):
+    """Kept for backwards compatibility (other modules may import it)."""
     if isinstance(df.columns, pd.MultiIndex):
-        # drop whichever level is the ticker/constant level
         df.columns = df.columns.get_level_values(0)
     return df

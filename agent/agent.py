@@ -1,8 +1,9 @@
+import asyncio
 import os
+import re
 from enum import Enum
 
 import pandas as pd
-import pandas_ta as ta
 import yfinance as yf
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
@@ -11,7 +12,11 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from typing_extensions import TypedDict, Optional, Any
 
-from train import train
+from agent import newsfeed
+from train import features, timing, train
+
+
+NEWS_FETCH_TIMEOUT_SEC = 30
 
 
 class Signal(Enum):
@@ -28,8 +33,12 @@ class AgentState(TypedDict):
     headlines: list[str]
     price_data: Optional[pd.DataFrame]
     indicators: dict
+    as_of: str                  # date of the latest bar the features were computed from
     sentiment_score: float
-    predicted_delta: float
+    predicted_delta: float      # XGBoost expected % move over timing.BASE_HORIZON trading days
+    delta_curve: dict           # {horizon_days: expected cumulative % move}
+    manifest: dict              # when the move is expected to play out (see timing.build_manifest)
+    model_validated: bool       # did the base-horizon model show out-of-sample skill?
     signal: str
     signal_confidence: float
     signal_score: float
@@ -42,16 +51,15 @@ class TickerAgent:
     newsLimit: int
 
     def __init__(
-            self,
-            model: str,
-            temp: float,
-            newsLimit: int = 5
+        self,
+        model: str,
+        temp: float,
+        newsLimit: int = 5
     ):
         print(f"🤖 Initializing TickerAgent for model {model}...")
         api_key = os.getenv("API_KEY")
         provider = os.getenv("LLM_PROVIDER")
         print(f"   Provider: {provider}")
-
         self.newsLimit = newsLimit
 
         # Determine the correct API key parameter based on provider
@@ -59,7 +67,6 @@ class TickerAgent:
             "model": model,
             "temperature": temp,
         }
-
         if provider:
             kwargs["model_provider"] = provider
 
@@ -107,126 +114,119 @@ class TickerAgent:
             raise
 
     async def _fetch_news(self, state: AgentState) -> AgentState:
-        print(f"  [node] fetching news for {state['ticker']}...")
-        ticker_obj = yf.Ticker(state["ticker"])
-        raw_news = ticker_obj.news[:5]
-        state["news"] = raw_news
+        print(f"   [node] fetching news for {state['ticker']}...")
+        try:
+            state["news"] = await asyncio.wait_for(
+                asyncio.to_thread(newsfeed.fetch_news, state["ticker"], self.newsLimit),
+                timeout=NEWS_FETCH_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            print(f"   ⏱️  news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s for {state['ticker']}")
+            state["news"] = []
+        except Exception as e:  # keep the pipeline alive: no news just means sentiment = 0
+            print(f"   ⚠️  news fetch failed for {state['ticker']}: {type(e).__name__}: {e}")
+            state["news"] = []
+        if not state["news"]:
+            print(f"   📭 no news items for {state['ticker']}")
         return state
 
     async def _extract_headline(self, state: AgentState) -> AgentState:
-        # TODO fix news for multiple sources
-        print(f"  [node] extracting headline for {state['ticker']}...")
+        print(f"   [node] extracting headline for {state['ticker']}...")
         state["headlines"] = []
-        if state["news"]:
-            for news in state["news"]:
-                state["headlines"].append(str(news.get("content").get("summary").strip()))
-
+        for item in state.get("news") or []:
+            n = newsfeed.normalize(item)
+            text = n["summary"] or n["title"]
+            if text:
+                state["headlines"].append(text)
         return state
 
     async def _compute_indicators(self, state: AgentState) -> AgentState:
-        ticker_obj = yf.Ticker(state["ticker"])
-        df: pd.DataFrame = ticker_obj.history(period="60d")
-        if df.empty:
+        # Uses train/features.py -- the exact code the model was trained with.
+        # Blocking yfinance calls run in threads so they don't stall the event loop.
+        ticker = state["ticker"]
+        prices, vix = await asyncio.gather(
+            asyncio.to_thread(features.fetch_history, ticker, features.LIVE_PERIOD),
+            asyncio.to_thread(features.fetch_vix, features.LIVE_PERIOD),
+        )
+        feats = features.build_features(prices, vix)
+
+        if feats.empty:
+            print(f"   ⚠️  no usable features for {ticker} (price/VIX data missing or too short)")
             state["price_data"] = None
             state["indicators"] = {}
             return state
 
-        # Trend + Momentum + Volatility (same as training)
-        df["EMA_21"] = ta.ema(df["Close"], length=21)
-        df["EMA_50"] = ta.ema(df["Close"], length=50)
-        df["RSI_14"] = ta.rsi(df["Close"], length=14)
-        macd = ta.macd(df["Close"], fast=12, slow=26, signal=9)
-        df = pd.concat([df, macd], axis=1)
-        bb = ta.bbands(df["Close"], length=20, std=2)
-        df = pd.concat([df, bb], axis=1)
-
-        try:
-            vix_df = yf.Ticker("^VIX").history(period="5d")
-            vix_current = float(vix_df["Close"].iloc[-1]) if not vix_df.empty else 20.0
-        except:
-            vix_current = 20.0
-
-        latest = df.dropna().iloc[-1]
-        close = float(latest["Close"])
-
-        state["price_data"] = df
-        state["indicators"] = {
-            "RSI_14": float(latest["RSI_14"]) if pd.notna(latest["RSI_14"]) else 50.0,
-            "price_to_ema21": close / float(latest.get("EMA_21", close)) if latest.get("EMA_21") else 1.0,
-            "vix_current": vix_current,
-            "MACD_12_26_9": float(latest["MACD_12_26_9"]) if pd.notna(latest.get("MACD_12_26_9")) else 0.0,
-            "MACDs_12_26_9": float(latest.get("MACDs_12_26_9", 0)) if pd.notna(latest.get("MACDs_12_26_9")) else 0.0,
-            "EMA_21": float(latest.get("EMA_21", close)),
-            # "BBM_20_2.0": float(latest["BBM_20_2.0"]) if pd.notna(latest.get("BBM_20_2.0")) else 100.0,
-            # "BBB_20_2.0": float(latest["BBB_20_2.0"]) if pd.notna(latest.get("BBB_20_2.0")) else 0.02,
-        }
-
-        # Simple pullback flag (for optional filtering)
-        in_uptrend = close > float(latest.get("EMA_50", close))
-        near_ema_pullback = 0.98 < state["indicators"]["price_to_ema21"] < 1.02
-        state["indicators"]["pullback_buy_setup"] = 1 if in_uptrend and near_ema_pullback else 0
-
+        latest = feats.iloc[-1]
+        state["price_data"] = prices
+        state["as_of"] = feats.index[-1].date().isoformat()
+        state["indicators"] = {c: float(latest[c]) for c in features.FEATURE_COLS}
         return state
 
     async def _sentiment_analysis(self, state: AgentState) -> AgentState:
-        print(f"  [node] sentiment analysis for {state['ticker']}...")
-        if not state.get("headlines") or len(state["headlines"]) == 0:
-            state["sentiment_score"] = 0.0
-            return state
+        print(f"   [node] sentiment analysis for {state['ticker']}...")
+        headlines = str(','.join(state["headlines"])).strip() if state.get("headlines") or len(state["headlines"]) > 0 else ""
 
+        # NOTE: the prompt gets the indicator dict, not the whole `state` (which now
+        # holds a year of OHLCV and the raw news payloads).
+        indicators = state.get("indicators", {})
         prompt = f"""
-        Analyze ONLY the impact of these headlines separated by ',' on the stock price of {state["ticker"]} given the 
-        following indicator values {state} 
+        Analyze ONLY the impact of these headlines separated by ',' on the stock price of {state["ticker"]} given the
+        following indicator values {indicators}
         Return a single number between -1.0 (strongly negative) and +1.0 (strongly positive).
-        Given the current VIX indicator is at {state["indicators"]["vix_current"]}
+        Given the current VIX indicator is at {indicators.get("vix_current", "unknown")}
         Do not explain — just the number.
-    
-        Headlines: {str(','.join(state["headlines"])).strip()}
+        Headlines: {headlines}
+
+        if there are no headlines provided give a sentiment score generated from the most updated top news headlines on the internet 
         """
 
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
-        content = response.content[0].get("text").strip()
-
-        try:
-            score = float("".join(c for c in content if c.isdigit() or c in ".-"))
-            score = max(min(score, 1.0), -1.0)
-            print("score", score)
-        except ValueError:
-            score = 0.0
-
+        content = self._response_text(response)
+        match = re.search(r"-?\d+(?:\.\d+)?", content)
+        score = max(min(float(match.group()), 1.0), -1.0) if match else 0.0
+        print("score", score, f"(raw reply: {content[:40]!r})")
         state["sentiment_score"] = score
         return state
 
+    @staticmethod
+    def _response_text(response) -> str:
+        """LangChain returns .content as a str for some providers and a list of blocks for others."""
+        content = response.content
+        if isinstance(content, str):
+            return content.strip()
+        parts = []
+        for block in content or []:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                parts.append(str(block.get("text", "")))
+        return " ".join(parts).strip()
+
     async def _xgboost_predict(self, state: AgentState) -> AgentState:
         print("_xgboost_predict")
+        state["predicted_delta"] = 0.0
+        state["delta_curve"] = {}
+        state["model_validated"] = False
+        state["manifest"] = {"reliable": False, "reason": "no model or no indicators"}
 
-        if train.get_model() is None:
-            state["predicted_delta"] = 0.0
+        bundle = train.get_bundle()
+        ind = state.get("indicators") or {}
+        if bundle is None or not ind:
             return state
 
-        ind = state["indicators"]
+        # Sentiment is deliberately NOT a model input (no historical sentiment exists to
+        # train on). It enters the decision in _generate_signal instead.
+        cols = features.FEATURE_COLS
+        X = pd.DataFrame([{c: float(ind[c]) for c in cols}], columns=cols)
 
-        feat_dict = {
-            "sentiment_score": float(state["sentiment_score"]),
-            "pullback_buy_setup": float(ind.get("pullback_buy_setup", 0)),
-            "RSI_14": float(ind.get("RSI_14", 50.0)),
-            "price_to_ema21": float(ind.get("price_to_ema21", 1.0)),
-            "vix_current": float(ind.get("vix_current", 20.0)),
-        }
+        curve = timing.predict_curve(bundle["models"], X)
+        state["delta_curve"] = {h: round(v, 4) for h, v in curve.items()}
+        state["predicted_delta"] = round(curve[timing.BASE_HORIZON], 4)
+        state["model_validated"] = timing.BASE_HORIZON in bundle["trusted"]
+        state["manifest"] = timing.build_manifest(curve, bundle["trusted"], pd.Timestamp(state["as_of"]))
 
-        # Add other technicals if available
-        for col in ["MACD_12_26_9", "MACDs_12_26_9", "EMA_21"]:
-            if col in ind:
-                feat_dict[col] = float(ind[col])
-
-        X = pd.DataFrame([feat_dict])
-
-        raw_pred = train.get_model().predict(X)[0]
-        state["predicted_delta"] = round(float(raw_pred), 4)
-
-        # Debug print (remove later)
-        print(f"DEBUG [{state['ticker']}] Raw XGBoost output: {raw_pred:.4f}")
-
+        print(f"DEBUG [{state['ticker']}] {timing.BASE_HORIZON}d Δ: {state['predicted_delta']:+.4f}% "
+              f"(validated={state['model_validated']})")
         return state
 
     async def _generate_signal(self, state: AgentState) -> AgentState:

@@ -117,6 +117,8 @@ def walk_forward_validate(
                (one value per fold; the gate uses their mean and t-statistic)
       hit_rate share of test rows where sign(pred) == sign(realised)
       base_up  share of test rows that actually went up (the hit-rate to beat)
+      calib_beta / trust_weight / resid_std
+               out-of-sample calibration of the prediction's SIZE, used by agent/decision.py
     """
     dates = np.sort(D["date"].unique())
     n = len(dates)
@@ -128,6 +130,8 @@ def walk_forward_validate(
         ics: list[float] = []
         hits: list[float] = []
         ups: list[float] = []
+        oos_pred: list[np.ndarray] = []
+        oos_real: list[np.ndarray] = []
         n_test = 0
         for k in range(n_folds):
             lo, hi = int(edges[k]), int(edges[k + 1])
@@ -145,6 +149,8 @@ def walk_forward_validate(
             ics.append(0.0 if pd.isna(ic) else float(ic))
             hits.append(float((np.sign(pred) == np.sign(real)).mean()))
             ups.append(float((real > 0).mean()))
+            oos_pred.append(pred)
+            oos_real.append(real)
             n_test += len(te)
 
         if ics:
@@ -158,10 +164,29 @@ def walk_forward_validate(
         trusted = bool(
             len(ics) >= MIN_FOLDS and ic_mean >= MIN_IC and t_stat >= MIN_T_STAT
         )
+
+        # Calibration: how much of the raw prediction is real? Regress realised moves on the
+        # out-of-sample predictions (through the origin, so equity drift doesn't leak in).
+        # beta ~ 1 means the model's size is right, ~ 0 means it is noise, > 1 is clipped.
+        beta, resid_std = 0.0, float("nan")
+        if oos_pred:
+            P, R = np.concatenate(oos_pred), np.concatenate(oos_real)
+            denom = float(np.dot(P, P))
+            beta = float(np.clip(np.dot(P, R) / denom, 0.0, 1.0)) if denom > 0 else 0.0
+            resid_std = float(np.std(R - beta * P))
+        # trust_weight: soft version of the gate, rising from 0 (t <= 0) to 1 (t >= MIN_T_STAT).
+        # Used by the decision layer to shrink forecasts instead of all-or-nothing switching.
+        if len(ics) >= MIN_FOLDS and np.isfinite(t_stat) and ic_mean > 0:
+            trust_weight = float(np.clip(t_stat / MIN_T_STAT, 0.0, 1.0))
+        else:
+            trust_weight = 0.0
         out[h] = {
             "ic_mean": ic_mean,
             "ic_by_fold": [round(i, 4) for i in ics],
             "t_stat": t_stat,
+            "calib_beta": beta,
+            "resid_std": resid_std,
+            "trust_weight": trust_weight,
             "pos_frac": pos_frac,
             "hit_rate": float(np.mean(hits)) if hits else float("nan"),
             "base_up": float(np.mean(ups)) if ups else float("nan"),
@@ -178,14 +203,14 @@ def trusted_horizons(metrics: dict[int, dict]) -> list[int]:
 def print_validation(metrics: dict[int, dict]) -> None:
     print("\n📊 Walk-forward validation (purged, expanding window)")
     print(f"   gate: mean IC >= {MIN_IC} and t-stat across folds >= {MIN_T_STAT}")
-    print(f"   {'h':>3} {'IC':>8} {'t':>6} {'folds>0':>8} {'hit%':>6} {'up%':>6} {'n_test':>8}  trusted")
+    print(f"   {'h':>3} {'IC':>8} {'t':>6} {'folds>0':>8} {'hit%':>6} {'up%':>6} {'beta':>5} {'w':>5} {'n_test':>8}  trusted")
     for h in HORIZONS:
         m = metrics.get(h)
         if not m:
             continue
         print(
             f"   {h:>3} {m['ic_mean']:>8.4f} {m['t_stat']:>6.2f} {m['pos_frac']:>8.0%} {m['hit_rate']:>6.1%} "
-            f"{m['base_up']:>6.1%} {m['n_test']:>8}  {'YES' if m['trusted'] else 'no'}"
+            f"{m['base_up']:>6.1%} {m['calib_beta']:>5.2f} {m['trust_weight']:>5.2f} {m['n_test']:>8}  {'YES' if m['trusted'] else 'no'}"
         )
     t = trusted_horizons(metrics)
     print(f"   -> trusted horizons: {t if t else 'NONE (timing output will be withheld)'}\n")

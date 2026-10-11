@@ -21,13 +21,13 @@ from typing import Optional
 import yfinance as yf
 
 from train import train, timing
-from agent import newsfeed
+from agent import decision, newsfeed
 from agent.agent import TickerAgent
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-TICKERS = ["AVGO"]  # the model is trained on exactly these tickers (and nothing else)
+TICKERS = ["GRAB","GOOG","SOFI"]  # the model is trained on exactly these tickers (and nothing else)
 
 # =============================================================================
 # CONCURRENT TICKER PROCESSOR (with semaphore)
@@ -58,6 +58,16 @@ def print_result(ticker: str, result: dict) -> None:
     else:
         print(f"   Timing   : withheld — {m.get('reason', 'n/a')}")
 
+    d = result.get("signal_detail") or {}
+    if "mu_total_pct" in d:
+        print(f"   Decision : E[move] {d['mu_total_pct']:+.2f}% (model {d['mu_model_pct']:+.2f}% + sentiment "
+              f"{d['mu_sentiment_pct']:+.2f}%) ± {d['sigma_pct']:.2f}% | P(beats {d['cost_pct']}% costs) = {d['p_win']:.0%}")
+        print(f"   Weights  : model beta {d['beta_eff']:.2f} (calibration {d['beta_raw']:.2f} × trust {d['trust_weight']:.2f}); "
+              f"sentiment {d['gamma']:.3f}σ per +1.0 [{d['gamma_source']}]")
+        if d.get("target_date"):
+            print(f"   Review by: {d['target_date']}")
+    else:
+        print(f"   Decision : {d.get('reason', 'n/a')}")
     print(f"   Signal   : **{result['signal']}** (Confidence: {result['signal_confidence']:.2f})")
 
 
@@ -137,6 +147,10 @@ async def main():
     # Training downloads ~10y for each ticker in TICKERS and runs walk-forward validation,
     # so keep it off the event loop. (Cached after the first run.)
     await asyncio.to_thread(train.xgboost, TICKERS)
+    # Learn the LLM-sentiment weight from past logged calls whose outcomes have since played out.
+    params = await asyncio.to_thread(decision.refit_sentiment)
+    print(f"🧮 sentiment weight: {params['sentiment_gamma']:.3f}σ per +1.0 "
+          f"({params['source']}, n={params['n']}, sd={params['sentiment_gamma_sd']:.3f})")
     ticker_agent = TickerAgent("gemini-3.6-flash", 0.0)
 
     consumers = [

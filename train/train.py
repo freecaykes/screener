@@ -28,8 +28,8 @@ from train import features, timing
 TRAIN_PERIOD = "10y"
 MIN_ROWS_PER_TICKER = 300
 
-MODEL_PATH = "xgboost_bundle_v2.pkl"
-BUNDLE_VERSION = 2
+MODEL_PATH = "xgboost_bundle_v3.pkl"
+BUNDLE_VERSION = 3   # v3: validation metrics now include calibration (beta / trust_weight)
 
 MODEL: Optional[XGBRegressor] = None   # the BASE_HORIZON model (what `predicted_delta` uses)
 BUNDLE: Optional[dict] = None          # models for all horizons + validation metrics

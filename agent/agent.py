@@ -12,7 +12,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from typing_extensions import TypedDict, Optional, Any
 
-from agent import newsfeed
+from . import decision, newsfeed
 from train import features, timing, train
 
 
@@ -41,7 +41,8 @@ class AgentState(TypedDict):
     model_validated: bool       # did the base-horizon model show out-of-sample skill?
     signal: str
     signal_confidence: float
-    signal_score: float
+    signal_score: float         # expected move in sigma units (signed)
+    signal_detail: dict         # why: components, weights and their provenance
 
 
 class TickerAgent:
@@ -230,51 +231,31 @@ class TickerAgent:
         return state
 
     async def _generate_signal(self, state: AgentState) -> AgentState:
+        """Expected-value decision (see agent/decision.py).
+
+        Replaces the old hand-weighted sum. The model's forecast is scaled by its measured
+        out-of-sample calibration, LLM sentiment by a weight learned from this agent's own
+        logged calls, both in units of the ticker's current volatility; confidence is the
+        probability the move beats costs.
+        """
         print("_generate_signal")
-        """
-        Clean weighted scoring system for generating trading signals.
-        """
-        delta = state["predicted_delta"]  # XGBoost predicted % move
-        sentiment = state["sentiment_score"]
-        vix = state["indicators"].get("vix_current", -1)
-        pullback = bool(state["indicators"].get("pullback_buy_setup", 0))
+        ind = state.get("indicators") or {}
+        bundle = train.get_bundle()
+        base_metrics = ((bundle or {}).get("metrics") or {}).get(timing.BASE_HORIZON)
 
-        # ====================== WEIGHTED SCORING ======================
-        score = 0.0
+        out = decision.decide(
+            pred_delta=state.get("predicted_delta", 0.0),
+            base_metrics=base_metrics,
+            vol_20d=ind.get("vol_20d"),
+            sentiment=state.get("sentiment_score", 0.0),
+            params=decision.load_params(),
+            as_of=state.get("as_of"),
+            manifest=state.get("manifest"),
+        )
+        state["signal"] = out["signal"]
+        state["signal_confidence"] = out["confidence"]
+        state["signal_score"] = out["score"]
+        state["signal_detail"] = out["detail"]
 
-        # Core components with tunable weights
-        score += delta * 0.50  # XGBoost prediction has highest weight
-        score += sentiment * 0.30  # Sentiment from LLM
-        score += (1 if pullback else -0.4) * 0.15  # Pullback setup bonus/penalty
-        score -= (vix - 18) * 0.012  # High VIX penalty (fear reduces conviction)
-
-        # Optional: Add momentum bonus
-        rsi = state["indicators"].get("RSI_14", 50)
-        if 45 < rsi < 65:  # Healthy momentum zone during pullback
-            score += 0.25
-
-        # ====================== SIGNAL MAPPING ======================
-        if score >= 1.85:
-            signal = "STRONG BUY"
-            confidence = min(0.92, 0.45 + score * 0.18)
-        elif score >= 0.95:
-            signal = "BUY"
-            confidence = min(0.82, 0.40 + score * 0.22)
-        elif score >= 0.25:
-            signal = "BUY"
-            confidence = min(0.68, 0.35 + score * 0.20)
-        elif score >= -0.35:
-            signal = "HOLD"
-            confidence = 0.75
-        elif score >= -1.1:
-            signal = "SELL"
-            confidence = min(0.78, 0.45 + abs(score) * 0.22)
-        else:
-            signal = "STRONG SELL"
-            confidence = min(0.90, 0.50 + abs(score) * 0.20)
-
-        state["signal"] = signal
-        state["signal_confidence"] = round(float(confidence), 2)
-        state["signal_score"] = round(float(score), 3)  # Useful for debugging
-
+        decision.record(state, out)  # shadow log: this is what lets sentiment's weight be learned
         return state

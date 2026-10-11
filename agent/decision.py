@@ -192,7 +192,7 @@ def record(state: dict, out: dict, path: str = LOG_PATH) -> None:
         with open(path, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception as e:
-        print(f"   ⚠️  could not write decision log: {e}")
+        print(f"could not write decision log: {e}")
 
 
 def read_log(path: str = LOG_PATH) -> list[dict]:
@@ -237,7 +237,7 @@ def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> li
                 df = fetch(tkr)
                 closes[tkr] = df["Close"] if df is not None and not df.empty else pd.Series(dtype=float)
             except Exception as e:
-                print(f"   ⚠️  could not fetch prices for {tkr}: {e}")
+                print(f"could not fetch prices for {tkr}: {e}")
                 closes[tkr] = pd.Series(dtype=float)
         c = closes[tkr]
         if c.empty or not r.get("as_of"):
@@ -277,7 +277,7 @@ def refit_sentiment(
     try:
         labeled = label_outcomes(read_log(log_path), fetch)
     except Exception as e:  # network trouble etc.: keep whatever we had
-        print(f"   ⚠️  sentiment refit skipped: {type(e).__name__}: {e}")
+        print(f"sentiment refit skipped: {type(e).__name__}: {e}")
         return params
     if not labeled:
         return params

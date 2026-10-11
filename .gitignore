@@ -10,6 +10,7 @@
 /dataSources.local.xml
 
 **/**/*.pkl
+**/**/*_log.json*
 **/**/*_key.txt
 
 **/**/__pycache__

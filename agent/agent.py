@@ -122,13 +122,13 @@ class TickerAgent:
                 timeout=NEWS_FETCH_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
-            print(f"   ⏱️  news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s for {state['ticker']}")
+            print(f"news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s for {state['ticker']}")
             state["news"] = []
         except Exception as e:  # keep the pipeline alive: no news just means sentiment = 0
-            print(f"   ⚠️  news fetch failed for {state['ticker']}: {type(e).__name__}: {e}")
+            print(f"news fetch failed for {state['ticker']}: {type(e).__name__}: {e}")
             state["news"] = []
         if not state["news"]:
-            print(f"   📭 no news items for {state['ticker']}")
+            print(f"no news items for {state['ticker']}")
         return state
 
     async def _extract_headline(self, state: AgentState) -> AgentState:
@@ -152,7 +152,7 @@ class TickerAgent:
         feats = features.build_features(prices, vix)
 
         if feats.empty:
-            print(f"   ⚠️  no usable features for {ticker} (price/VIX data missing or too short)")
+            print(f"no usable features for {ticker} (price/VIX data missing or too short)")
             state["price_data"] = None
             state["indicators"] = {}
             return state
@@ -175,18 +175,28 @@ class TickerAgent:
         following indicator values {indicators}
         Return a single number between -1.0 (strongly negative) and +1.0 (strongly positive).
         Given the current VIX indicator is at {indicators.get("vix_current", "unknown")}
-        Do not explain — just the number.
         Headlines: {headlines}
 
-        if there are no headlines provided give a sentiment score generated from the most updated top news headlines on the internet 
+        If there are no headlines provided, give a sentiment score generated from the most recent top news headline.
+        Output the one headline from either one of the provided headlines provided or on that you found that has the largest weight on the sentiment score with the score itself in this format
+        
+        headline: <headline name>
+        score: <sentiment score>
+
+        eg.
+        headline: "AMD Stock Is Set to Benefit From Both Physical and Agentic AI"
+        score: 0.65
         """
 
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
         content = self._response_text(response)
-        match = re.search(r"-?\d+(?:\.\d+)?", content)
-        score = max(min(float(match.group()), 1.0), -1.0) if match else 0.0
-        print("score", score, f"(raw reply: {content[:40]!r})")
+        data = dict(re.findall(r"([A-Za-z]+):\s*([^\n]+)", content))
+
+        headline = data.get("headline")
+        score = max(min(float(data.get("score")), 1.0), -1.0)
+
         state["sentiment_score"] = score
+        state["headlines"] = [headline]
         return state
 
     @staticmethod

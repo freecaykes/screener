@@ -209,7 +209,7 @@ def trusted_horizons(metrics: dict[int, dict]) -> list[int]:
 
 
 def print_validation(metrics: dict[int, dict]) -> None:
-    print("\n📊 Walk-forward validation (purged, expanding window)")
+    print("\nWalk-forward validation (purged, expanding window)")
     print(f"   gate: mean IC >= {MIN_IC} and t-stat across folds >= {MIN_T_STAT}")
     print(f"   {'h':>3} {'IC':>8} {'t':>6} {'folds>0':>8} {'hit%':>6} {'up%':>6} {'beta':>5} {'w':>5} {'n_test':>8}  trusted")
     for h in HORIZONS:

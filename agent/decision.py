@@ -7,9 +7,13 @@ already XGBoost inputs). This module replaces it with an expected-value decision
 
     E[move]  =  beta * xgboost_delta          # how much of the model's forecast is real
               + gamma * sentiment * sigma     # how much LLM sentiment moves price, in sigma units
-    sigma    =  vol_20d * sqrt(horizon)       # current volatility over the horizon
+    sigma    =  excess_vol_20d * sqrt(horizon)  # volatility of the EXCESS move over the horizon
     P(win)   =  Phi( (|E[move]| - costs) / sigma )   # chance the move beats costs, as a probability
 
+All moves here are EXCESS moves: the stock minus its benchmark (SPY by default). A BUY is
+"expected to outperform the benchmark", so sigma is the volatility of that difference, not of
+the stock alone. To capture it you would pair the stock with an opposite benchmark position;
+trading only the stock leg also exposes you to the market's direction.
   * beta   : MEASURED. Out-of-sample calibration slope x trust weight from the walk-forward
              validation (train/timing.py). Noise model -> beta ~ 0 -> forecast ~ 0 -> HOLD.
   * gamma  : LEARNED. The LLM sentiment has no price history to train on, so it starts from
@@ -40,7 +44,8 @@ LOG_PATH = "signal_log.jsonl"
 PARAMS_PATH = "decision_params.json"
 
 # ---- decision policy: risk appetite and costs (not predictions) -------------
-COST_PCT = 0.10        # assumed round-trip cost + slippage, in % of price
+COST_PCT = 0.10        # assumed round-trip cost + slippage, in % of price (a hedged pair costs ~2x)
+EARNINGS_BLACKOUT_CAL_DAYS = 4   # abstain if earnings are due within this many calendar days
 P_ACT = 0.55           # need >= 55% chance the move beats costs to say BUY / SELL
 P_STRONG = 0.65        # ... and >= 65% for STRONG BUY / STRONG SELL
 MIN_SIGMA_PCT = 0.25   # numerical floor so a dead-calm stretch can't divide by ~0
@@ -73,25 +78,30 @@ def decide(
     *,
     pred_delta: float,
     base_metrics: Optional[dict],
-    vol_20d: Optional[float],
+    daily_vol_pct: Optional[float],
     sentiment: float,
     params: Optional[dict] = None,
     horizon: int = timing.BASE_HORIZON,
     as_of=None,
     manifest: Optional[dict] = None,
+    days_to_earn: Optional[float] = None,
 ) -> dict:
     """Return {'signal', 'confidence', 'score', 'detail'}.
 
-    pred_delta   raw XGBoost expected % move over `horizon` trading days
-    base_metrics validation metrics for that horizon (needs calib_beta, trust_weight)
-    vol_20d      20-day std of daily returns, in %
-    sentiment    LLM score in [-1, 1]
+    pred_delta    raw XGBoost expected EXCESS % move (vs benchmark) over `horizon` trading days
+    base_metrics  validation metrics for that horizon (needs calib_beta, trust_weight)
+    daily_vol_pct 20-day std of the daily EXCESS return, in %  (features: excess_vol_20d)
+    sentiment     LLM score in [-1, 1]
+    days_to_earn  calendar days to the next earnings date, if known
     """
     params = params or DEFAULT_PARAMS
-    if vol_20d is None or not np.isfinite(vol_20d):
+    if daily_vol_pct is None or not np.isfinite(daily_vol_pct):
         return _hold("no volatility estimate (indicators unavailable)")
+    if days_to_earn is not None and np.isfinite(days_to_earn) and 0 <= days_to_earn <= EARNINGS_BLACKOUT_CAL_DAYS:
+        # A binary earnings gap dwarfs a 3-day statistical edge, so don't trade through it.
+        return _hold(f"earnings in {days_to_earn:.0f} day(s): abstaining through the announcement")
 
-    sigma = max(float(vol_20d) * math.sqrt(horizon), MIN_SIGMA_PCT)
+    sigma = max(float(daily_vol_pct) * math.sqrt(horizon), MIN_SIGMA_PCT)
 
     m = base_metrics or {}
     beta_raw = float(m.get("calib_beta", 0.0))
@@ -181,6 +191,7 @@ def record(state: dict, out: dict, path: str = LOG_PATH) -> None:
             "ticker": state.get("ticker"),
             "as_of": state.get("as_of"),
             "horizon": d["horizon"],
+            "benchmark": state.get("benchmark"),  # marks the row as market-relative
             "headline": (state.get("headlines") or [""])[0][:160],
             "sentiment": float(state.get("sentiment_score", 0.0)),
             "pred_delta": state.get("predicted_delta"),
@@ -192,7 +203,7 @@ def record(state: dict, out: dict, path: str = LOG_PATH) -> None:
         with open(path, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception as e:
-        print(f"could not write decision log: {e}")
+        print(f"   could not write decision log: {e}")
 
 
 def read_log(path: str = LOG_PATH) -> list[dict]:
@@ -215,11 +226,13 @@ def read_log(path: str = LOG_PATH) -> list[dict]:
 # Learning the sentiment weight from the agent's own matured calls
 # ---------------------------------------------------------------------------
 def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> list[dict]:
-    """Attach the realised % move over each row's horizon (from the as_of close).
+    """Attach the realised EXCESS % move (stock minus benchmark) over each row's horizon.
 
-    Rows whose horizon hasn't elapsed yet are skipped. Rows are also thinned so a ticker's
-    kept rows are at least `horizon` trading days apart -- otherwise consecutive days share
-    most of their outcome window and the sample looks bigger than it is.
+    Measured from the as_of close. Skipped: rows whose horizon hasn't elapsed yet, and
+    legacy rows logged before the market-relative target (no "benchmark" field -- their
+    forecast was on a different basis). Rows are also thinned so a ticker's kept rows are
+    at least `horizon` trading days apart, otherwise consecutive days share most of their
+    outcome window and the sample looks bigger than it is.
     """
     # newest log entry wins for identical (ticker, as_of, headline)
     uniq: dict[tuple, dict] = {}
@@ -228,27 +241,37 @@ def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> li
     ordered = sorted(uniq.values(), key=lambda r: (str(r.get("ticker")), str(r.get("as_of"))))
 
     closes: dict[str, pd.Series] = {}
+
+    def close_of(sym: str) -> pd.Series:
+        if sym not in closes:
+            try:
+                df = fetch(sym)
+                closes[sym] = df["Close"] if df is not None and not df.empty else pd.Series(dtype=float)
+            except Exception as e:
+                print(f"   could not fetch prices for {sym}: {e}")
+                closes[sym] = pd.Series(dtype=float)
+        return closes[sym]
+
     last_kept: dict[str, int] = {}
     out: list[dict] = []
     for r in ordered:
-        tkr, h = r.get("ticker"), int(r.get("horizon", timing.BASE_HORIZON))
-        if tkr not in closes:
-            try:
-                df = fetch(tkr)
-                closes[tkr] = df["Close"] if df is not None and not df.empty else pd.Series(dtype=float)
-            except Exception as e:
-                print(f"could not fetch prices for {tkr}: {e}")
-                closes[tkr] = pd.Series(dtype=float)
-        c = closes[tkr]
-        if c.empty or not r.get("as_of"):
+        tkr, bsym, h = r.get("ticker"), r.get("benchmark"), int(r.get("horizon", timing.BASE_HORIZON))
+        if not bsym or not r.get("as_of"):
             continue
+        c = close_of(tkr)
+        bc = close_of(bsym)
+        if c.empty or bc.empty:
+            continue
+        bc = bc.reindex(c.index, method="ffill")
         i = int(c.index.get_indexer([pd.Timestamp(r["as_of"])])[0])
-        if i < 0 or i + h >= len(c):
+        if i < 0 or i + h >= len(c) or pd.isna(bc.iloc[i]) or pd.isna(bc.iloc[i + h]):
             continue  # unknown date, or the outcome hasn't happened yet
         if tkr in last_kept and i - last_kept[tkr] < h:
             continue  # overlaps the previously kept row
         last_kept[tkr] = i
-        out.append({**r, "ret_pct": float((c.iloc[i + h] / c.iloc[i] - 1.0) * 100.0)})
+        stock_ret = c.iloc[i + h] / c.iloc[i] - 1.0
+        bench_ret = bc.iloc[i + h] / bc.iloc[i] - 1.0
+        out.append({**r, "ret_pct": float((stock_ret - bench_ret) * 100.0)})
     return out
 
 
@@ -277,7 +300,7 @@ def refit_sentiment(
     try:
         labeled = label_outcomes(read_log(log_path), fetch)
     except Exception as e:  # network trouble etc.: keep whatever we had
-        print(f"sentiment refit skipped: {type(e).__name__}: {e}")
+        print(f"    sentiment refit skipped: {type(e).__name__}: {e}")
         return params
     if not labeled:
         return params

@@ -1,0 +1,19 @@
+# Config for the news-sentiment + XGBoost ticker agent.
+# Secrets (the API key) do NOT go here: put them in .env and name the variable below.
+
+[general]
+tickers = ["NOW"]
+
+[runtime]
+news_poll_interval_sec = 300   # how often to check Yahoo Finance for new headlines
+news_limit = 5                 # headlines fetched per ticker
+news_fetch_timeout_sec = 30    # give up on a slow news fetch after this long
+max_concurrent = 5             # consumer workers analysing tickers at once
+
+[llm]
+# Passed to langchain's init_chat_model. Examples: google_genai, openai, anthropic, xai.
+# Leave empty ("") to let langchain infer the provider from the model name.
+provider = "google"
+model = "gemini-3.6-flash"
+temperature = 0.0
+api_key_env = "API_KEY"        # name of the env var / .env entry holding the key

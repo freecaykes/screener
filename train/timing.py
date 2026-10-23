@@ -53,13 +53,21 @@ def target_cols() -> list[str]:
 
 
 def add_horizon_targets(df: pd.DataFrame) -> pd.DataFrame:
-    """target_delta_{h} = % change of Close from t to t+h trading days.
+    """target_delta_{h} = % move from t to t+h trading days.
 
-    Compute this on the FULL price series (before any row dropping) so the
-    shift is by real trading days. Tail rows get NaN for longer horizons.
+    If `df` has a "Bench" column (benchmark close on the same dates) the target is the
+    EXCESS move: stock % change minus benchmark % change. That removes market direction,
+    which is most of a stock's short-horizon variance and not something stock-level
+    features can predict. Without "Bench" it is the plain stock move.
+
+    Compute this on the FULL price series (before any row dropping) so the shift is by
+    real trading days. Tail rows get NaN for longer horizons.
     """
     for h in HORIZONS:
-        df[f"target_delta_{h}"] = (df["Close"].shift(-h) - df["Close"]) / df["Close"] * 100
+        move = df["Close"].shift(-h) / df["Close"] - 1.0
+        if "Bench" in df.columns:
+            move = move - (df["Bench"].shift(-h) / df["Bench"] - 1.0)
+        df[f"target_delta_{h}"] = move * 100.0
     return df
 
 
@@ -78,7 +86,7 @@ def make_regressor() -> XGBRegressor:
     )
 
 
-def fit_horizon_models(D: pd.DataFrame, feature_cols: list[str], min_rows: int = 500) -> dict[int, XGBRegressor]:
+def fit_horizon_models(D: pd.DataFrame, feature_cols: list[str], min_rows: int = 100) -> dict[int, XGBRegressor]:
     """Fit one model per horizon on the whole dataset D (features + target_delta_* columns)."""
     models: dict[int, XGBRegressor] = {}
     for h in HORIZONS:

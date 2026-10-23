@@ -12,7 +12,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.state import CompiledStateGraph
 from typing_extensions import TypedDict, Optional, Any
 
-from . import decision, newsfeed
+from agent import decision, newsfeed
 from train import features, timing, train
 
 
@@ -33,9 +33,10 @@ class AgentState(TypedDict):
     headlines: list[str]
     price_data: Optional[pd.DataFrame]
     indicators: dict
-    as_of: str                  # date of the latest bar the features were computed from
+    as_of: str                  # last COMPLETED session the features were computed from
+    benchmark: str              # what the forecast is measured against (e.g. SPY)
     sentiment_score: float
-    predicted_delta: float      # XGBoost expected % move over timing.BASE_HORIZON trading days
+    predicted_delta: float      # XGBoost expected EXCESS % move vs benchmark over timing.BASE_HORIZON days
     delta_curve: dict           # {horizon_days: expected cumulative % move}
     manifest: dict              # when the move is expected to play out (see timing.build_manifest)
     model_validated: bool       # did the base-horizon model show out-of-sample skill?
@@ -57,7 +58,7 @@ class TickerAgent:
         temp: float,
         newsLimit: int = 5
     ):
-        print(f"🤖 Initializing TickerAgent for model {model}...")
+        print(f"Initializing TickerAgent for model {model}...")
         api_key = os.getenv("API_KEY")
         provider = os.getenv("LLM_PROVIDER")
         print(f"   Provider: {provider}")
@@ -101,7 +102,7 @@ class TickerAgent:
 
         self.workflow = workflow
         self.app = self.workflow.compile()
-        print("✅ TickerAgent workflow compiled.")
+        print("TickerAgent workflow compiled.")
 
     async def run(self, ticker: str) -> AgentState:
         print(f"🚀 Running agent for {ticker}...")
@@ -145,11 +146,17 @@ class TickerAgent:
         # Uses train/features.py -- the exact code the model was trained with.
         # Blocking yfinance calls run in threads so they don't stall the event loop.
         ticker = state["ticker"]
-        prices, vix = await asyncio.gather(
+        state["benchmark"] = features.benchmark_for(ticker)
+        prices, vix, bench, earnings = await asyncio.gather(
             asyncio.to_thread(features.fetch_history, ticker, features.LIVE_PERIOD),
             asyncio.to_thread(features.fetch_vix, features.LIVE_PERIOD),
+            asyncio.to_thread(features.fetch_bench, ticker, features.LIVE_PERIOD),
+            asyncio.to_thread(features.fetch_earnings_dates, ticker),
         )
-        feats = features.build_features(prices, vix)
+        # Training only saw completed sessions; a half-formed bar (partial volume, last
+        # price as "close") would be a different distribution. Use the last finished session.
+        prices = features.drop_incomplete_last_bar(prices)
+        feats = features.build_features(prices, vix, bench, earnings)
 
         if feats.empty:
             print(f"no usable features for {ticker} (price/VIX data missing or too short)")
@@ -160,12 +167,13 @@ class TickerAgent:
         latest = feats.iloc[-1]
         state["price_data"] = prices
         state["as_of"] = feats.index[-1].date().isoformat()
-        state["indicators"] = {c: float(latest[c]) for c in features.FEATURE_COLS}
+        state["indicators"] = {c: float(latest[c]) for c in features.FEATURE_COLS}  # earnings may be NaN
         return state
 
     async def _sentiment_analysis(self, state: AgentState) -> AgentState:
         print(f"   [node] sentiment analysis for {state['ticker']}...")
         headlines = str(','.join(state["headlines"])).strip() if state.get("headlines") or len(state["headlines"]) > 0 else ""
+
 
         # NOTE: the prompt gets the indicator dict, not the whole `state` (which now
         # holds a year of OHLCV and the raw news payloads).
@@ -246,7 +254,7 @@ class TickerAgent:
         Replaces the old hand-weighted sum. The model's forecast is scaled by its measured
         out-of-sample calibration, LLM sentiment by a weight learned from this agent's own
         logged calls, both in units of the ticker's current volatility; confidence is the
-        probability the move beats costs.
+        probability the (excess) move beats costs.
         """
         print("_generate_signal")
         ind = state.get("indicators") or {}
@@ -256,11 +264,12 @@ class TickerAgent:
         out = decision.decide(
             pred_delta=state.get("predicted_delta", 0.0),
             base_metrics=base_metrics,
-            vol_20d=ind.get("vol_20d"),
+            daily_vol_pct=ind.get("excess_vol_20d"),
             sentiment=state.get("sentiment_score", 0.0),
             params=decision.load_params(),
             as_of=state.get("as_of"),
             manifest=state.get("manifest"),
+            days_to_earn=ind.get("days_to_earn"),
         )
         state["signal"] = out["signal"]
         state["signal_confidence"] = out["confidence"]

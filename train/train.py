@@ -7,6 +7,11 @@
 #   * Features come from train/features.py -- the same code the agent runs live,
 #     so train/serve skew (pullback definition, MACD units, ...) is gone.
 #   * Scale-dependent features (raw EMA_21, raw MACD) replaced by ratios.
+#   * MARKET-RELATIVE target: the model predicts the stock's move minus a benchmark's
+#     (SPY by default), so a BUY means "expected to beat the market", not "expected to rise".
+#   * Features with published research behind them (short-term reversal, 12-1 momentum,
+#     52-week high, volume, gaps, relative strength, beta, earnings timing) replace the
+#     generic RSI/MACD oscillators.
 #   * Trains ONLY on the tickers passed to xgboost() with 10y of history (was 2y),
 #     one model per horizon, with purged walk-forward validation whose result
 #     gates the timing output.
@@ -26,10 +31,10 @@ from xgboost import XGBRegressor
 from train import features, timing
 
 TRAIN_PERIOD = "10y"
-MIN_ROWS_PER_TICKER = 300
+MIN_ROWS_PER_TICKER = 100
 
-MODEL_PATH = "xgboost_bundle_v3.pkl"
-BUNDLE_VERSION = 3   # v3: validation metrics now include calibration (beta / trust_weight)
+MODEL_PATH = "xgboost_bundle_v4.pkl"
+BUNDLE_VERSION = 4   # v4: market-relative target + new feature set
 
 MODEL: Optional[XGBRegressor] = None   # the BASE_HORIZON model (what `predicted_delta` uses)
 BUNDLE: Optional[dict] = None          # models for all horizons + validation metrics
@@ -48,31 +53,50 @@ def get_horizon_models() -> dict:
 
 
 def build_dataset(tickers: list[str], period: Optional[str] = None) -> pd.DataFrame:
-    """Pooled frame: date, ticker, FEATURE_COLS, target_delta_* (one row per ticker-day)."""
+    """Pooled frame: date, ticker, FEATURE_COLS, target_delta_* (one row per ticker-day).
+
+    Only `tickers` become training rows. The VIX and the benchmark(s) are downloaded as
+    reference series (they feed features and the market-relative target) but are never
+    trained on.
+    """
     period = period or TRAIN_PERIOD
     vix = features.fetch_vix(period)
     if vix.empty:
         raise RuntimeError("Could not download ^VIX; refusing to train without it.")
 
+    benches: dict[str, pd.Series] = {}
+    for sym in sorted({features.benchmark_for(t) for t in tickers}):
+        hist = features.fetch_history(sym, period)
+        if hist.empty:
+            raise RuntimeError(f"Could not download benchmark {sym}; the target is market-relative.")
+        benches[sym] = hist["Close"]
+
     frames = []
     for tkr in tickers:
         try:
             prices = features.fetch_history(tkr, period)
-            feats = features.build_features(prices, vix)
+            bench = benches[features.benchmark_for(tkr)]
+            earnings = features.fetch_earnings_dates(tkr)
+            feats = features.build_features(prices, vix, bench, earnings)
         except Exception as e:  # network hiccup / bad symbol: skip, don't die
-            print(f"  ⚠️  {tkr}: skipped ({e})")
+            print(f"  {tkr}: skipped ({e})")
             continue
         if len(feats) < MIN_ROWS_PER_TICKER:
-            print(f"  ⚠️  {tkr}: only {len(feats)} usable rows, skipped")
+            print(f"  {tkr}: only {len(feats)} usable rows, skipped")
             continue
 
         # Targets from the FULL close series so shift(-h) is real trading days.
-        targets = timing.add_horizon_targets(prices[["Close"]].copy()).drop(columns="Close")
+        base = pd.DataFrame({
+            "Close": prices["Close"],
+            "Bench": features.align_series(bench, prices.index),
+        })
+        targets = timing.add_horizon_targets(base).drop(columns=["Close", "Bench"])
         feats = feats.join(targets)
         feats["ticker"] = tkr
         feats["date"] = feats.index
         frames.append(feats.reset_index(drop=True))
-        print(f"  → {tkr}: {len(feats)} rows")
+        print(f"  → {tkr}: {len(feats)} rows, {len(earnings)} earnings dates known "
+              f"(benchmark {features.benchmark_for(tkr)})")
 
     if not frames:
         raise ValueError("No training data collected")
@@ -89,16 +113,17 @@ def xgboost(tickers: list[str], force_retrain: bool = False) -> XGBRegressor:
             and cached.get("feature_cols") == features.FEATURE_COLS
             and cached.get("horizons") == timing.HORIZONS
             and cached.get("requested") == sorted(set(tickers))
+            and cached.get("benchmarks") == {t: features.benchmark_for(t) for t in sorted(set(tickers))}
         )
         if fresh:
             BUNDLE = cached
             MODEL = cached["models"][timing.BASE_HORIZON]
-            print(f"✅ Loaded model bundle from {MODEL_PATH} (trained through {cached['trained_through']})")
+            print(f"Loaded model bundle from {MODEL_PATH} (trained through {cached['trained_through']})")
             timing.print_validation(cached["metrics"])
             return MODEL
-        print(f"⚠️  {MODEL_PATH} is stale (features, horizons or tickers changed) -> retraining")
+        print(f"{MODEL_PATH} is stale (features, horizons, tickers or benchmarks changed) -> retraining")
 
-    print("🚀 Training multi-horizon XGBoost (shared features, no sentiment)...")
+    print("🚀 Training multi-horizon XGBoost (market-relative target, shared features, no sentiment)...")
     D = build_dataset(list(dict.fromkeys(tickers)))
     print(f"   dataset: {len(D):,} rows, {D['ticker'].nunique()} tickers, "
           f"{D['date'].min().date()} → {D['date'].max().date()}")
@@ -116,12 +141,14 @@ def xgboost(tickers: list[str], force_retrain: bool = False) -> XGBRegressor:
         "metrics": metrics,
         "trusted": timing.trusted_horizons(metrics),
         "requested": sorted(set(tickers)),
+        "benchmarks": {t: features.benchmark_for(t) for t in sorted(set(tickers))},
+        "target": "excess move vs benchmark, %",
         "trained_on": sorted(D["ticker"].unique().tolist()),
         "trained_through": str(D["date"].max().date()),
     }
     joblib.dump(BUNDLE, MODEL_PATH)
     MODEL = models[timing.BASE_HORIZON]
-    print(f"✅ Trained {len(models)} horizon models on {len(features.FEATURE_COLS)} features. "
+    print(f"Trained {len(models)} horizon models on {len(features.FEATURE_COLS)} features. "
           f"Saved to {MODEL_PATH}")
     return MODEL
 

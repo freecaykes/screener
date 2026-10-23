@@ -15,6 +15,7 @@
 # Much lighter on CPU & memory than threading!
 # =============================================================================
 import asyncio
+import math
 import time
 from typing import Optional
 
@@ -27,7 +28,7 @@ from agent.agent import TickerAgent
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-TICKERS = ["GRAB","GOOG","SOFI"]  # the model is trained on exactly these tickers (and nothing else)
+TICKERS = ["NBIS", "AVGO", "GOOG"]  # the model is trained on exactly these tickers (and nothing else)
 
 # =============================================================================
 # CONCURRENT TICKER PROCESSOR (with semaphore)
@@ -42,13 +43,17 @@ RUN_ON_STARTUP = True         # analyse each ticker once at startup, even if the
 
 def print_result(ticker: str, result: dict) -> None:
     ind = result["indicators"]
-    print(f"\n🔥 {ticker} @ {time.strftime('%H:%M:%S')}  (features as of {result.get('as_of', 'n/a')})")
+    print(f"\n{ticker} @ {time.strftime('%H:%M:%S')}  (features as of {result.get('as_of', 'n/a')})")
     print(f"   Headline : {' | '.join(result.get('headlines') or ['(none)'])[:100]}")
     print(f"   Sentiment: {result['sentiment_score']:.2f}")
     validated = "validated out-of-sample" if result.get("model_validated") else "NOT validated out-of-sample"
-    print(f"   XGBoost Δ: {result['predicted_delta']:+.2f}% over {timing.BASE_HORIZON}d ({validated})")
+    bench = result.get("benchmark", "benchmark")
+    print(f"   XGBoost Δ: {result['predicted_delta']:+.2f}% vs {bench} over {timing.BASE_HORIZON}d ({validated})")
     print(f"   VIX      : {ind.get('vix_current', 'N/A')}")
     print(f"   Pullback : {'Yes' if ind.get('pullback_buy_setup') else 'No'}")
+    dte = ind.get("days_to_earn")
+    if dte is not None and math.isfinite(dte):
+        print(f"   Earnings : next in {dte:.0f} day(s)")
 
     m = result.get("manifest") or {}
     if m.get("reliable"):
@@ -60,7 +65,7 @@ def print_result(ticker: str, result: dict) -> None:
 
     d = result.get("signal_detail") or {}
     if "mu_total_pct" in d:
-        print(f"   Decision : E[move] {d['mu_total_pct']:+.2f}% (model {d['mu_model_pct']:+.2f}% + sentiment "
+        print(f"   Decision : E[excess move] {d['mu_total_pct']:+.2f}% (model {d['mu_model_pct']:+.2f}% + sentiment "
               f"{d['mu_sentiment_pct']:+.2f}%) ± {d['sigma_pct']:.2f}% | P(beats {d['cost_pct']}% costs) = {d['p_win']:.0%}")
         print(f"   Weights  : model beta {d['beta_eff']:.2f} (calibration {d['beta_raw']:.2f} × trust {d['trust_weight']:.2f}); "
               f"sentiment {d['gamma']:.3f}σ per +1.0 [{d['gamma_source']}]")
@@ -68,18 +73,21 @@ def print_result(ticker: str, result: dict) -> None:
             print(f"   Review by: {d['target_date']}")
     else:
         print(f"   Decision : {d.get('reason', 'n/a')}")
-    print(f"   Signal   : **{result['signal']}** (Confidence: {result['signal_confidence']:.2f})")
+    if "mu_total_pct" in d:
+        print(f"   Signal   : **{result['signal']}** (Confidence: {result['signal_confidence']:.2f})")
+    else:  # abstained before estimating anything (earnings blackout / no data): confidence is n/a, not 0
+        print(f"   Signal   : **{result['signal']}** (abstained, no estimate made)")
 
 
 async def consumer(id: int, ticker_agent: TickerAgent):
     while True:
         ticker = await QUEUE.get()
         try:
-            print(f"🔧 Worker {id} started processing {ticker}")
+            print(f"Worker {id} started processing {ticker}")
             result = await ticker_agent.run(ticker)
             print_result(ticker, result)
         except Exception as e:
-            print(f"❌ Error processing {ticker}: {e}")
+            print(f"Error processing {ticker}: {e}")
         finally:
             QUEUE.task_done()
 
@@ -93,10 +101,10 @@ async def latest_headline(ticker: str) -> Optional[str]:
             asyncio.to_thread(newsfeed.fetch_news, ticker, 1), timeout=NEWS_FETCH_TIMEOUT_SEC
         )
     except asyncio.TimeoutError:
-        print(f"⏱️  [{ticker}] news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s")
+        print(f"[{ticker}] news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s")
         return None
     except Exception as e:
-        print(f"⚠️  [{ticker}] news fetch failed: {type(e).__name__}: {e}")
+        print(f"[{ticker}] news fetch failed: {type(e).__name__}: {e}")
         return None
 
     if not items:
@@ -107,7 +115,7 @@ async def latest_headline(ticker: str) -> Optional[str]:
     headline = n["title"] or n["summary"]
     if not headline:
         keys = list(items[0]) if isinstance(items[0], dict) else type(items[0]).__name__
-        print(f"❓ [{ticker}] newest news item has no title/summary; item keys: {keys}")
+        print(f"[{ticker}] newest news item has no title/summary; item keys: {keys}")
         return None
     return headline
 
@@ -120,7 +128,7 @@ async def news_source():
             headline = await latest_headline(ticker)
             if headline:
                 LAST_HEADLINES[ticker] = headline  # so the first poll doesn't re-run the same news
-            print(f"▶️  [startup] queueing {ticker} for an initial analysis")
+            print(f"[startup] queueing {ticker} for an initial analysis")
             await QUEUE.put(ticker)
 
     while True:
@@ -129,7 +137,7 @@ async def news_source():
             if headline is None:
                 continue  # reason already printed
             if headline == LAST_HEADLINES.get(ticker):
-                print(f"💤 [{ticker}] no new headline (latest: {headline[:60]!r})")
+                print(f"[{ticker}] no new headline (latest: {headline[:60]!r})")
                 continue
             print(f"📨 [NEW NEWS DETECTED] {ticker} → queued for processing headline: {headline[:50]} ...")
             LAST_HEADLINES[ticker] = headline
@@ -140,18 +148,18 @@ async def news_source():
 def _report_task_death(task: asyncio.Task) -> None:
     # gather(..., return_exceptions=True) would otherwise swallow a crashed task silently
     if not task.cancelled() and task.exception() is not None:
-        print(f"💥 background task died: {task.exception()!r}")
+        print(f"background task died: {task.exception()!r}")
 
 
 async def main():
     # Training downloads ~10y for each ticker in TICKERS and runs walk-forward validation,
     # so keep it off the event loop. (Cached after the first run.)
-    await asyncio.to_thread(train.xgboost, TICKERS)
+    await asyncio.to_thread(train.xgboost, TICKERS, True)
     # Learn the LLM-sentiment weight from past logged calls whose outcomes have since played out.
     params = await asyncio.to_thread(decision.refit_sentiment)
-    print(f"🧮 sentiment weight: {params['sentiment_gamma']:.3f}σ per +1.0 "
+    print(f"sentiment weight: {params['sentiment_gamma']:.3f}σ per +1.0 "
           f"({params['source']}, n={params['n']}, sd={params['sentiment_gamma_sd']:.3f})")
-    ticker_agent = TickerAgent("gemini-3.6-flash", 0.0)
+    ticker_agent = TickerAgent("gemini-3.8-flash", 0.0)
 
     consumers = [
         asyncio.create_task(consumer(i, ticker_agent))

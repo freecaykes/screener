@@ -28,7 +28,7 @@ from agent.agent import TickerAgent
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-TICKERS = ["NBIS", "AVGO", "GOOG"]  # the model is trained on exactly these tickers (and nothing else)
+TICKERS = ["META", "UBER", "NVDA"]  # the model is trained on exactly these tickers (and nothing else)
 
 # =============================================================================
 # CONCURRENT TICKER PROCESSOR (with semaphore)
@@ -56,6 +56,7 @@ def print_result(ticker: str, result: dict) -> None:
         print(f"   Earnings : next in {dte:.0f} day(s)")
 
     m = result.get("manifest") or {}
+
     if m.get("reliable"):
         edge = "  (still rising at window edge: read as 'no earlier than')" if m["peak_at_window_edge"] else ""
         print(f"   ~80% by  : {m['reach_date']} (+{m['reach_horizon']}d, {m['direction']})")
@@ -108,7 +109,7 @@ async def latest_headline(ticker: str) -> Optional[str]:
         return None
 
     if not items:
-        print(f"📭 [{ticker}] yfinance returned no news items (yfinance {yf.__version__})")
+        print(f"[{ticker}] yfinance returned no news items (yfinance {yf.__version__})")
         return None
 
     n = newsfeed.normalize(items[0])
@@ -128,20 +129,24 @@ async def news_source():
             headline = await latest_headline(ticker)
             if headline:
                 LAST_HEADLINES[ticker] = headline  # so the first poll doesn't re-run the same news
+
             print(f"[startup] queueing {ticker} for an initial analysis")
             await QUEUE.put(ticker)
 
     while True:
         for ticker in TICKERS:
             headline = await latest_headline(ticker)
-            if headline is None:
-                continue  # reason already printed
-            if headline == LAST_HEADLINES.get(ticker):
-                print(f"[{ticker}] no new headline (latest: {headline[:60]!r})")
-                continue
-            print(f"📨 [NEW NEWS DETECTED] {ticker} → queued for processing headline: {headline[:50]} ...")
-            LAST_HEADLINES[ticker] = headline
+            
+            if not headline:
+                print(f"[{ticker}] no new headline) running on LLM-found headline")
+            elif headline == LAST_HEADLINES.get(ticker):
+                print(f"[{ticker}] no new headline (latest: {headline[:60]!r}) running on LLM-found headline")
+            else:
+                print(f"[NEW NEWS DETECTED] {ticker} → queued for processing headline: {headline[:50]} ...")
+                LAST_HEADLINES[ticker] = headline
+
             await QUEUE.put(ticker)
+
         await asyncio.sleep(NEWS_POLL_INTERVAL_SEC)
 
 
@@ -166,6 +171,7 @@ async def main():
         for i in range(MAX_CONCURRENT)
     ]
     producer = asyncio.create_task(news_source())
+
     for t in [producer, *consumers]:
         t.add_done_callback(_report_task_death)
 
@@ -176,4 +182,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Async agent shut down gracefully.")
+        print("\nAsync agent shut down gracefully.")

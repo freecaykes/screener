@@ -43,6 +43,15 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
 import pandas as pd
+
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*deprecated*",
+    module=r"yfinance",
+)
+
 import yfinance as yf
 
 # ---------------------------------------------------------------------------

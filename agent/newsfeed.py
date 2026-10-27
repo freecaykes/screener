@@ -8,6 +8,14 @@ missing fields.
 """
 from __future__ import annotations
 
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*deprecated*",
+    module=r"yfinance",
+)
+
 import yfinance as yf
 
 

@@ -22,6 +22,14 @@ from datetime import datetime, time as dtime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*deprecated*",
+    module=r"yfinance",
+)
+
 import yfinance as yf
 
 from train import train
@@ -31,7 +39,7 @@ from agent.agent import TickerAgent
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-TICKERS = ["META"]  # your hand-picked list: the model learns from exactly these tickers (and nothing else)
+TICKERS = ["META", "NVDA"]  # your hand-picked list: the model learns from exactly these tickers (and nothing else)
 
 # =============================================================================
 # CONCURRENT TICKER PROCESSOR (with semaphore)
@@ -41,7 +49,6 @@ NEWS_POLL_INTERVAL_SEC = 300
 LAST_HEADLINES: dict[str, str] = {}
 MAX_CONCURRENT = 5
 NEWS_FETCH_TIMEOUT_SEC = 30   # a hung yfinance call no longer stalls the loop silently
-RUN_ON_STARTUP = True         # analyse each ticker once at startup, even if there is no news
 SCAN_TIME = dtime(16, 10)     # New York time: daily scan, just after the close (bars are complete by 16:05)
 _NY = ZoneInfo("America/New_York")
 
@@ -146,14 +153,6 @@ async def latest_headline(ticker: str) -> Optional[str]:
 
 async def news_source():
     print(f"📡 News director started — checking every {NEWS_POLL_INTERVAL_SEC}s")
-
-    if RUN_ON_STARTUP:
-        for ticker in TICKERS:
-            headline = await latest_headline(ticker)
-            if headline:
-                LAST_HEADLINES[ticker] = headline  # so the first poll doesn't re-run the same news
-            print(f"[startup] queueing {ticker} for an initial analysis")
-            await QUEUE.put(ticker)
 
     while True:
         for ticker in TICKERS:

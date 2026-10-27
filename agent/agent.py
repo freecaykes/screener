@@ -3,11 +3,16 @@ import json
 import os
 import re
 from enum import Enum
+import pandas as pd
 
 import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
 
-import pandas as pd
+warnings.filterwarnings(
+    "ignore",
+    message=r".*deprecated*",
+    module=r"yfinance",
+)
+
 import yfinance as yf
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
@@ -214,12 +219,11 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
  "thesis": "improved" | "intact" | "damaged" | "unclear"   (effect of this news on the company's business outlook),
  "materiality": <number 0 to 1: how much this could lastingly change the outlook; 0 = noise>,
  "reason": "<one short sentence>"}}"""
-        response = await self.llm.ainvoke([HumanMessage(content=prompt)])
 
-        print(f"response: {response}")
+        response = await self.llm.ainvoke([HumanMessage(content=prompt)])
         state["news_analysis"] = self._parse_news(self._response_text(response))
         state["sentiment_score"] = state["news_analysis"]["sentiment"]
-        print(f" sdffsadsfasdasfdasfdf  news: {state['news_analysis']}")
+        
         return state
 
     @staticmethod

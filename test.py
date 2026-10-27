@@ -199,15 +199,15 @@ def load_or_train_xgboost(tickers: list[str]) -> XGBRegressor:
     model_path = "xgboost_stock_delta_model.pkl"
 
     if os.path.exists(model_path):
-        print(f"✅ Loading existing XGBoost model from {model_path}")
+        logging.info(f"✅ Loading existing XGBoost model from {model_path}")
         return joblib.load(model_path)
 
-    print("🚀 Training new XGBoost model on 2 years of historical data...")
+    logging.info("🚀 Training new XGBoost model on 2 years of historical data...")
     all_X = []
     all_y = []
 
     for tkr in tickers:
-        print(f"   → Collecting data for {tkr}")
+        logging.info(f"   → Collecting data for {tkr}")
         df = yf.download(tkr, period="2y", progress=False)
         if len(df) < 100:
             continue
@@ -255,7 +255,7 @@ def load_or_train_xgboost(tickers: list[str]) -> XGBRegressor:
     model.fit(X_total, y_total)
 
     joblib.dump(model, model_path)
-    print(f"✅ XGBoost model trained and saved to {model_path}")
+    logging.info(f"✅ XGBoost model trained and saved to {model_path}")
     return model
 
 
@@ -266,7 +266,7 @@ def continuous_worker(ticker: str):
     global MODEL
     last_headline = None
 
-    print(f"📡 Started continuous agent for {ticker}")
+    logging.info(f"📡 Started continuous agent for {ticker}")
 
     while True:
         try:
@@ -277,21 +277,21 @@ def continuous_worker(ticker: str):
 
             # Only process and print when we see a BRAND NEW headline
             if current_headline and current_headline != last_headline and current_headline != "No recent news found":
-                print(f"\n🔥 [NEW NEWS] {ticker} @ {time.strftime('%H:%M:%S')}")
-                print(f"   Headline : {current_headline}")
-                print(f"   Sentiment: {result['sentiment_score']:.2f}")
-                print(f"   Indicators:")
+                logging.info(f"\n🔥 [NEW NEWS] {ticker} @ {time.strftime('%H:%M:%S')}")
+                logging.info(f"   Headline : {current_headline}")
+                logging.info(f"   Sentiment: {result['sentiment_score']:.2f}")
+                logging.info(f"   Indicators:")
                 for k, v in result["indicators"].items():
-                    print(f"      {k:15} → {v:.4f}")
-                print(f"   🔮 XGBoost Predicted Delta: {result['predicted_delta']:+.2f}%")
+                    logging.info(f"      {k:15} → {v:.4f}")
+                logging.info(f"   🔮 XGBoost Predicted Delta: {result['predicted_delta']:+.2f}%")
                 last_headline = current_headline
 
             # Optional: print "no change" every few polls (comment out if too noisy)
             # else:
-            #     print(f"   {ticker} – no new news")
+            #     logging.info(f"   {ticker} – no new news")
 
         except Exception as e:
-            print(f"⚠️ Error in {ticker} worker: {e}")
+            logging.info(f"⚠️ Error in {ticker} worker: {e}")
 
         time.sleep(POLL_INTERVAL_SEC)
 
@@ -310,13 +310,13 @@ if __name__ == "__main__":
         t.start()
         threads.append(t)
 
-    print(f"\n🚀 All {len(TICKERS)} LangGraph agents running in parallel!")
-    print(f"   Polling every {POLL_INTERVAL_SEC} seconds for new Yahoo Finance news.")
-    print("   Press Ctrl+C to stop.\n")
+    logging.info(f"\n🚀 All {len(TICKERS)} LangGraph agents running in parallel!")
+    logging.info(f"   Polling every {POLL_INTERVAL_SEC} seconds for new Yahoo Finance news.")
+    logging.info("   Press Ctrl+C to stop.\n")
 
     # Keep main thread alive
     try:
         while True:
             time.sleep(60)
     except KeyboardInterrupt:
-        print("\n👋 Shutting down all agents... Goodbye!")
+        logging.info("\n👋 Shutting down all agents... Goodbye!")

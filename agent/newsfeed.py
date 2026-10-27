@@ -16,6 +16,7 @@ warnings.filterwarnings(
     module=r"yfinance",
 )
 
+import logging
 import yfinance as yf
 
 
@@ -38,5 +39,5 @@ def normalize(item) -> dict:
 
 def fetch_news(ticker: str, limit: int = 5) -> list:
     """Raw yfinance news items (possibly empty). Blocking: call via asyncio.to_thread."""
-    print()
+    logging.info()
     return list(yf.Ticker(ticker).news or [])[:limit]

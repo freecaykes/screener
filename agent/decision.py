@@ -31,6 +31,7 @@ import json
 import math
 from datetime import datetime, timezone
 from typing import Callable, Optional
+import logging
 
 import numpy as np
 
@@ -214,7 +215,7 @@ def record(state: dict, out: dict, path: str = LOG_PATH) -> None:
         with open(path, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception as e:
-        print(f"   ⚠️  could not write decision log: {e}")
+        logging.info(f"   ⚠️  could not write decision log: {e}")
 
 
 def read_log(path: str = LOG_PATH) -> list[dict]:
@@ -257,7 +258,7 @@ def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> li
                 df = fetch(tkr)
                 ohlc[tkr] = df if df is not None and not df.empty else None
             except Exception as e:
-                print(f"   ⚠️  could not fetch prices for {tkr}: {e}")
+                logging.info(f"   ⚠️  could not fetch prices for {tkr}: {e}")
                 ohlc[tkr] = None
         df = ohlc[tkr]
         atr_pct = r.get("atr_pct")
@@ -302,7 +303,7 @@ def refit_news(log_path: str = LOG_PATH, params_path: str = PARAMS_PATH,
     try:
         labeled = label_outcomes(read_log(log_path), fetch)
     except Exception as e:
-        print(f"   ⚠️  news refit skipped: {type(e).__name__}: {e}")
+        logging.info(f"   ⚠️  news refit skipped: {type(e).__name__}: {e}")
         return params
     labeled = [r for r in labeled if r.get("p_pre_news") and r.get("news_strength") is not None]
     if not labeled:

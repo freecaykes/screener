@@ -12,6 +12,7 @@ warnings.filterwarnings(
     message=r".*deprecated*",
     module=r"yfinance",
 )
+import logging
 
 import yfinance as yf
 from langchain.chat_models import init_chat_model
@@ -66,10 +67,10 @@ class TickerAgent:
         temp: float,
         newsLimit: int = 5
     ):
-        print(f"🤖 Initializing TickerAgent for model {model}...")
+        logging.info(f"🤖 Initializing TickerAgent for model {model}...")
         api_key = os.getenv("API_KEY")
         provider = os.getenv("LLM_PROVIDER")
-        print(f"   Provider: {provider}")
+        logging.info(f"   Provider: {provider}")
         self.newsLimit = newsLimit
 
         # Determine the correct API key parameter based on provider
@@ -88,7 +89,7 @@ class TickerAgent:
             # Fallback
             kwargs["api_key"] = api_key
 
-        print(f"   init_chat_model kwargs: { {k: v for k, v in kwargs.items() if 'key' not in k} }")
+        logging.info(f"   init_chat_model kwargs: { {k: v for k, v in kwargs.items() if 'key' not in k} }")
         self.llm = init_chat_model(**kwargs)
 
         workflow = StateGraph(state_schema=AgentState)
@@ -110,38 +111,38 @@ class TickerAgent:
 
         self.workflow = workflow
         self.app = self.workflow.compile()
-        print("✅ TickerAgent workflow compiled.")
+        logging.info("✅ TickerAgent workflow compiled.")
 
     async def run(self, ticker: str) -> AgentState:
-        print(f"🚀 Running agent for {ticker}...")
+        logging.info(f"🚀 Running agent for {ticker}...")
         initial_state: AgentState = {"ticker": ticker}
         try:
             result = await self.app.ainvoke(initial_state)
-            print(f"🏁 Finished agent for {ticker}.")
+            logging.info(f"🏁 Finished agent for {ticker}.")
             return result
         except Exception as e:
-            print(f"💥 Error in TickerAgent.run for {ticker}: {e}")
+            logging.info(f"💥 Error in TickerAgent.run for {ticker}: {e}")
             raise
 
     async def _fetch_news(self, state: AgentState) -> AgentState:
-        print(f"   [node] fetching news for {state['ticker']}...")
+        logging.info(f"   [node] fetching news for {state['ticker']}...")
         try:
             state["news"] = await asyncio.wait_for(
                 asyncio.to_thread(newsfeed.fetch_news, state["ticker"], self.newsLimit),
                 timeout=NEWS_FETCH_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
-            print(f"   ⏱️  news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s for {state['ticker']}")
+            logging.info(f"   ⏱️  news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s for {state['ticker']}")
             state["news"] = []
         except Exception as e:  # keep the pipeline alive: no news just means sentiment = 0
-            print(f"   ⚠️  news fetch failed for {state['ticker']}: {type(e).__name__}: {e}")
+            logging.info(f"   ⚠️  news fetch failed for {state['ticker']}: {type(e).__name__}: {e}")
             state["news"] = []
         if not state["news"]:
-            print(f"   📭 no news items for {state['ticker']}")
+            logging.info(f"   📭 no news items for {state['ticker']}")
         return state
 
     async def _extract_headline(self, state: AgentState) -> AgentState:
-        print(f"   [node] extracting headline for {state['ticker']}...")
+        logging.info(f"   [node] extracting headline for {state['ticker']}...")
         state["headlines"] = []
         for item in state.get("news") or []:
             n = newsfeed.normalize(item)
@@ -167,7 +168,7 @@ class TickerAgent:
         prices = features.drop_incomplete_last_bar(prices)
         table = setups.build_setup_table(prices, vix, bench, earnings)
         if table.empty:
-            print(f"   ⚠️  no usable data for {ticker} (price/VIX/{state['benchmark']} missing or too short)")
+            logging.info(f"   ⚠️  no usable data for {ticker} (price/VIX/{state['benchmark']} missing or too short)")
             return state
 
         latest = table.iloc[-1]
@@ -186,7 +187,7 @@ class TickerAgent:
             return state
         state["p_info"] = setup_model.predict_final(bundle, state["indicators"], state["setup"])
         p = state["p_info"]
-        print(f"   [{state['ticker']}] {state['setup']}: p(any day)={p['p_any']:.2f}  p(setup)={p['p_setup']:.2f}  "
+        logging.info(f"   [{state['ticker']}] {state['setup']}: p(any day)={p['p_any']:.2f}  p(setup)={p['p_setup']:.2f}  "
               f"-> p(final)={p['p_final']:.2f}  (setup trust {p['setup_trust']:.2f}, model trust {p['model_trust']:.2f}, "
               f"validated={p['validated']})")
         return state
@@ -208,7 +209,7 @@ class TickerAgent:
         state["news_analysis"], state["sentiment_score"] = None, 0.0
         if not state.get("setup"):
             return state
-        print(f"   [node] reading news for {state['ticker']} in the context of {state['setup']}...")
+        logging.info(f"   [node] reading news for {state['ticker']} in the context of {state['setup']}...")
         prompt = f"""You are assisting a swing trader looking at {state['ticker']}.
 Active setup: {self._SETUP_BRIEF[state['setup']]}
 
@@ -265,7 +266,7 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
         """BUY / SELL only when a setup is active, it has out-of-sample support, and the expected value
         after costs clears the bar (agent/decision.py). Otherwise HOLD -- with the setup, its plan and
         the reason shown if one is active."""
-        print("_generate_signal")
+        logging.info("_generate_signal")
         ind = state.get("indicators") or {}
         if not ind:  # data outage / too little history: say so, rather than "no setup"
             state["signal"], state["signal_confidence"], state["signal_score"] = "HOLD", 0.0, 0.0

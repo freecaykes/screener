@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, TypeVar, get_type_hints
@@ -196,4 +197,4 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
 if __name__ == "__main__":
     from pprint import pprint
 
-    pprint(load_config())
+    plogging.info(load_config())

@@ -24,6 +24,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from xgboost import XGBRegressor
+import logging
+
 
 try:  # optional: exact NYSE holidays
     import pandas_market_calendars as mcal
@@ -209,19 +211,19 @@ def trusted_horizons(metrics: dict[int, dict]) -> list[int]:
 
 
 def print_validation(metrics: dict[int, dict]) -> None:
-    print("\nWalk-forward validation (purged, expanding window)")
-    print(f"   gate: mean IC >= {MIN_IC} and t-stat across folds >= {MIN_T_STAT}")
-    print(f"   {'h':>3} {'IC':>8} {'t':>6} {'folds>0':>8} {'hit%':>6} {'up%':>6} {'beta':>5} {'w':>5} {'n_test':>8}  trusted")
+    logging.info("\nWalk-forward validation (purged, expanding window)")
+    logging.info(f"   gate: mean IC >= {MIN_IC} and t-stat across folds >= {MIN_T_STAT}")
+    logging.info(f"   {'h':>3} {'IC':>8} {'t':>6} {'folds>0':>8} {'hit%':>6} {'up%':>6} {'beta':>5} {'w':>5} {'n_test':>8}  trusted")
     for h in HORIZONS:
         m = metrics.get(h)
         if not m:
             continue
-        print(
+        logging.info(
             f"   {h:>3} {m['ic_mean']:>8.4f} {m['t_stat']:>6.2f} {m['pos_frac']:>8.0%} {m['hit_rate']:>6.1%} "
             f"{m['base_up']:>6.1%} {m['calib_beta']:>5.2f} {m['trust_weight']:>5.2f} {m['n_test']:>8}  {'YES' if m['trusted'] else 'no'}"
         )
     t = trusted_horizons(metrics)
-    print(f"   -> trusted horizons: {t if t else 'NONE (timing output will be withheld)'}\n")
+    logging.info(f"   -> trusted horizons: {t if t else 'NONE (timing output will be withheld)'}\n")
 
 
 # ---------------------------------------------------------------------------

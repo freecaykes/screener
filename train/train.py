@@ -13,6 +13,7 @@
 # =============================================================================
 import os
 from typing import Optional
+import logging
 
 import joblib
 import pandas as pd
@@ -63,15 +64,15 @@ def xgboost(tickers: list[str], force_retrain: bool = False) -> Optional[dict]:
         )
         if fresh:
             BUNDLE = cached
-            print(f"✅ Loaded setup model from {MODEL_PATH} (trained through {cached['trained_through']})")
+            logging.info(f"✅ Loaded setup model from {MODEL_PATH} (trained through {cached['trained_through']})")
             setup_model.print_validation(cached["metrics"], cached["rules"], cached["baselines"])
             return BUNDLE
-        print(f"⚠️  {MODEL_PATH} is stale (features, strategy, tickers or benchmarks changed) -> retraining")
+        logging.info(f"⚠️  {MODEL_PATH} is stale (features, strategy, tickers or benchmarks changed) -> retraining")
 
-    print("🚀 Building swing-setup dataset from your tickers (market-relative features, shared with live inference)...")
+    logging.info("🚀 Building swing-setup dataset from your tickers (market-relative features, shared with live inference)...")
     D, A = setup_model.build_dataset(tickers, TRAIN_PERIOD)
     baselines = setup_model.baselines_from(A)
-    print(f"   {len(D)} labelled setups across {D['ticker'].nunique()} ticker(s), "
+    logging.info(f"   {len(D)} labelled setups across {D['ticker'].nunique()} ticker(s), "
           f"{D['date'].min().date()} → {D['date'].max().date()}")
 
     metrics = setup_model.walk_forward_validate(D)
@@ -79,7 +80,7 @@ def xgboost(tickers: list[str], force_retrain: bool = False) -> Optional[dict]:
     setup_model.print_validation(metrics, rules, baselines)
 
     if len(D) < setup_model.MIN_ROWS_TO_FIT:
-        print(f"⚠️  only {len(D)} labelled setups (< {setup_model.MIN_ROWS_TO_FIT}): not enough to learn from. "
+        logging.info(f"⚠️  only {len(D)} labelled setups (< {setup_model.MIN_ROWS_TO_FIT}): not enough to learn from. "
               f"Setups will still be detected and reported, without a model probability. "
               f"Adding tickers is the only way to get more.")
         model = None
@@ -100,7 +101,7 @@ def xgboost(tickers: list[str], force_retrain: bool = False) -> Optional[dict]:
         "trained_through": str(D["date"].max().date()),
     }
     joblib.dump(BUNDLE, MODEL_PATH)
-    print(f"✅ Saved to {MODEL_PATH}" + ("" if model is not None else "  (no model: too few setups)"))
+    logging.info(f"✅ Saved to {MODEL_PATH}" + ("" if model is not None else "  (no model: too few setups)"))
     return BUNDLE
 
 

@@ -38,10 +38,6 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
-
 import pandas as pd
 
 import warnings
@@ -52,6 +48,7 @@ warnings.filterwarnings(
     module=r"yfinance",
 )
 
+import logging
 import yfinance as yf
 
 # ---------------------------------------------------------------------------
@@ -157,7 +154,7 @@ def fetch_earnings_dates(ticker: str, limit: int = 60) -> pd.DatetimeIndex:
     except Exception as e:
         if ticker not in _earnings_warned:  # warn once per ticker, not on every run
             _earnings_warned.add(ticker)
-            print(f"  ⚠️  {ticker}: earnings dates unavailable ({type(e).__name__}: {e}); "
+            logging.info(f"  ⚠️  {ticker}: earnings dates unavailable ({type(e).__name__}: {e}); "
                   f"earnings features will be NaN")
         return pd.DatetimeIndex([])
 

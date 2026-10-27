@@ -31,6 +31,7 @@ warnings.filterwarnings(
 )
 
 import yfinance as yf
+import logging
 
 from train import train
 from agent import decision, newsfeed
@@ -67,19 +68,19 @@ def seconds_until_next_scan(now: Optional[datetime] = None) -> float:
 def print_result(ticker: str, result: dict) -> None:
     ind = result.get("indicators") or {}
     d = result.get("signal_detail") or {}
-    print(f"\n🔥 {ticker} @ {time.strftime('%H:%M:%S')}  (last completed session: {result.get('as_of', 'n/a')}, "
+    logging.info(f"\{ticker} @ {time.strftime('%H:%M:%S')}  (last completed session: {result.get('as_of', 'n/a')}, "
           f"vs {result.get('benchmark', 'benchmark')})")
-    print(f"   Headline : {' | '.join(result.get('headlines') or ['(none)'])[:100]}")
+    logging.info(f"   Headline : {' | '.join(result.get('headlines') or ['(none)'])[:100]}")
     dte = ind.get("days_to_earn")
     if dte is not None and math.isfinite(dte):
-        print(f"   Earnings : next in {dte:.0f} day(s)")
+        logging.info(f"   Earnings : next in {dte:.0f} day(s)")
 
     setup = result.get("setup") or ""
     if not setup:
         if d.get("reason", "").startswith("no usable data"):
-            print(f"   Status   : HOLD -- {d['reason']}")
+            logging.info(f"   Status   : HOLD -- {d['reason']}")
         else:
-            print(f"   Setup    : none active -> HOLD")
+            logging.info(f"   Setup    : none active -> HOLD")
         return
     if setup in ("breakout_buy", "breakdown_sell"):
         what = (f"closed {ind.get('bo_atr', float('nan')):.1f} ATR through the 20-day {'high' if setup == 'breakout_buy' else 'low'} "
@@ -87,38 +88,38 @@ def print_result(ticker: str, result: dict) -> None:
     else:
         what = (f"{'dip' if setup == 'pullback_buy' else 'rally'} of {ind.get('depth_atr', float('nan')):.1f} ATR from the 10-day "
                 f"{'high' if setup == 'pullback_buy' else 'low'}, reversal candle today")
-    print(f"   Setup    : {setup.upper()}  ({what}; ATR {ind.get('atr_pct', float('nan')):.2f}% of price)")
+    logging.info(f"   Setup    : {setup.upper()}  ({what}; ATR {ind.get('atr_pct', float('nan')):.2f}% of price)")
 
     news = d.get("news") or result.get("news_analysis")
     if news:
-        print(f"   News     : sentiment {news['sentiment']:+.2f}, thesis '{news['thesis']}', materiality {news['materiality']:.2f}"
+        logging.info(f"   News     : sentiment {news['sentiment']:+.2f}, thesis '{news['thesis']}', materiality {news['materiality']:.2f}"
               f" -- {news.get('reason', '')}")
     if "p_final" in d:
-        print(f"   Odds     : any-day {d['p_any']:.0%} -> this setup {d['p_setup']:.0%} -> final {d['p_final']:.0%} "
+        logging.info(f"   Odds     : any-day {d['p_any']:.0%} -> this setup {d['p_setup']:.0%} -> final {d['p_final']:.0%} "
               f"(setup evidence {d['setup_trust']:.2f}, model {d['model_trust']:.2f}, news weight {d['gamma']:.2f} [{d['gamma_source']}])")
-        print(f"   Value    : EV {d['ev_R']:+.2f}R per trade after {d['cost_R']:.2f}R costs  "
+        logging.info(f"   Value    : EV {d['ev_R']:+.2f}R per trade after {d['cost_R']:.2f}R costs  "
               f"({'validated' if d['validated'] else 'NOT validated out-of-sample'})")
     plan = d.get("plan")
     if plan:
         verb = "Buy" if d.get("direction", 1) > 0 else "Sell/short"
-        print(f"   Plan     : {verb} near {plan['entry_ref']:.2f} | stop {plan['stop']:.2f} ({plan['stop_pct']:.1f}%) | "
+        logging.info(f"   Plan     : {verb} near {plan['entry_ref']:.2f} | stop {plan['stop']:.2f} ({plan['stop_pct']:.1f}%) | "
               f"target {plan['target']:.2f} ({plan['target_pct']:.1f}%) | exit by {plan['max_hold_date']}")
     if result["signal"] == "HOLD":
         tag = "WATCH" if d.get("watch") else "HOLD"
-        print(f"   Signal   : **HOLD** [{tag}] {d.get('reason', '')}")
+        logging.info(f"   Signal   : **HOLD** [{tag}] {d.get('reason', '')}")
     else:
-        print(f"   Signal   : **{result['signal']}** (P(target before stop) {result['signal_confidence']:.0%})")
+        logging.info(f"   Signal   : **{result['signal']}** (P(target before stop) {result['signal_confidence']:.0%})")
 
 
 async def consumer(id: int, ticker_agent: TickerAgent):
     while True:
         ticker = await QUEUE.get()
         try:
-            print(f"🔧 Worker {id} started processing {ticker}")
+            logging.info(f"🔧 Worker {id} started processing {ticker}")
             result = await ticker_agent.run(ticker)
             print_result(ticker, result)
         except Exception as e:
-            print(f"❌ Error processing {ticker}: {e}")
+            logging.info(f"❌ Error processing {ticker}: {e}")
         finally:
             QUEUE.task_done()
 
@@ -132,37 +133,37 @@ async def latest_headline(ticker: str) -> Optional[str]:
             asyncio.to_thread(newsfeed.fetch_news, ticker, 1), timeout=NEWS_FETCH_TIMEOUT_SEC
         )
     except asyncio.TimeoutError:
-        print(f"[{ticker}] news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s")
+        logging.info(f"[{ticker}] news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s")
         return None
     except Exception as e:
-        print(f"[{ticker}] news fetch failed: {type(e).__name__}: {e}")
+        logging.info(f"[{ticker}] news fetch failed: {type(e).__name__}: {e}")
         return None
 
     if not items:
-        print(f"[{ticker}] yfinance returned no news items (yfinance {yf.__version__})")
+        logging.info(f"[{ticker}] yfinance returned no news items (yfinance {yf.__version__})")
         return None
 
     n = newsfeed.normalize(items[0])
     headline = n["title"] or n["summary"]
     if not headline:
         keys = list(items[0]) if isinstance(items[0], dict) else type(items[0]).__name__
-        print(f"[{ticker}] newest news item has no title/summary; item keys: {keys}")
+        logging.info(f"[{ticker}] newest news item has no title/summary; item keys: {keys}")
         return None
     return headline
 
 
 async def news_source():
-    print(f"📡 News director started — checking every {NEWS_POLL_INTERVAL_SEC}s")
+    logging.info(f"News director started — checking every {NEWS_POLL_INTERVAL_SEC}s")
 
     while True:
         for ticker in TICKERS:
             headline = await latest_headline(ticker)
             if not headline:
-                print(f"[{ticker}] no new headline) running on LLM-found headline")
+                logging.info(f"[{ticker}] no new headline) running on LLM-found headline")
             elif headline == LAST_HEADLINES.get(ticker):
-                print(f"[{ticker}] no new headline (latest: {headline[:60]!r}) running on LLM-found headline")
+                logging.info(f"[{ticker}] no new headline (latest: {headline[:60]!r}) running on LLM-found headline")
             else:
-                print(f"[NEW NEWS DETECTED] {ticker} → queued for processing headline: {headline[:50]} ...")
+                logging.info(f"[NEW NEWS DETECTED] {ticker} → queued for processing headline: {headline[:50]} ...")
                 LAST_HEADLINES[ticker] = headline
                 
             await QUEUE.put(ticker)
@@ -173,10 +174,10 @@ async def daily_scan():
     """Queue every ticker once a day just after the close, when the day's bar is complete."""
     while True:
         wait = seconds_until_next_scan()
-        print(f"🗓️  next daily scan in {wait/3600:.1f}h")
+        logging.info(f"🗓️  next daily scan in {wait/3600:.1f}h")
         await asyncio.sleep(wait)
         for ticker in TICKERS:
-            print(f"🗓️  [daily scan] queueing {ticker}")
+            logging.info(f"🗓️  [daily scan] queueing {ticker}")
             await QUEUE.put(ticker)
         await asyncio.sleep(60)  # don't fire twice for the same minute
 
@@ -184,7 +185,7 @@ async def daily_scan():
 def _report_task_death(task: asyncio.Task) -> None:
     # gather(..., return_exceptions=True) would otherwise swallow a crashed task silently
     if not task.cancelled() and task.exception() is not None:
-        print(f"💥 background task died: {task.exception()!r}")
+        logging.info(f"💥 background task died: {task.exception()!r}")
 
 
 async def main():
@@ -193,7 +194,7 @@ async def main():
     await asyncio.to_thread(train.xgboost, TICKERS)
     # Learn the news weight from past logged calls whose stop/target outcomes have since played out.
     params = await asyncio.to_thread(decision.refit_news)
-    print(f"🧮 news weight: {params['news_gamma']:.3f} log-odds per +1.0 "
+    logging.info(f"🧮 news weight: {params['news_gamma']:.3f} log-odds per +1.0 "
           f"({params['source']}, n={params['n']}, sd={params['news_gamma_sd']:.3f})")
     ticker_agent = TickerAgent("gemini-3.8-flash", 0.0)
 
@@ -213,4 +214,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nAsync agent shut down gracefully.")
+        logging.info("\nAsync agent shut down gracefully.")

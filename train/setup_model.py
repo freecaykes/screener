@@ -26,6 +26,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from xgboost import XGBClassifier
+import logging
 
 from train import features, setups
 from train.setups import SETUP_FEATURES
@@ -107,10 +108,10 @@ def build_dataset(tickers: list[str], period: Optional[str] = None):
             earnings = features.fetch_earnings_dates(tkr)
             table = setups.build_setup_table(prices, vix, benches[features.benchmark_for(tkr)], earnings)
         except Exception as e:
-            print(f"  ⚠️  {tkr}: skipped ({e})")
+            logging.info(f"  ⚠️  {tkr}: skipped ({e})")
             continue
         if table.empty:
-            print(f"  ⚠️  {tkr}: no usable rows, skipped")
+            logging.info(f"  ⚠️  {tkr}: no usable rows, skipped")
             continue
 
         for d in (1.0, -1.0):  # what entering on a random day would have done, same barriers
@@ -123,7 +124,7 @@ def build_dataset(tickers: list[str], period: Optional[str] = None):
         lab["ticker"], lab["date"] = tkr, lab.index
         frames.append(lab.reset_index(drop=True))
         counts = lab["setup"].value_counts().to_dict()
-        print(f"  → {tkr}: {len(lab)} labelled setups {counts}")
+        logging.info(f"  → {tkr}: {len(lab)} labelled setups {counts}")
 
     if not frames:
         raise ValueError("No setups found for the given tickers")
@@ -294,22 +295,22 @@ def walk_forward_validate(D: pd.DataFrame, n_folds: int = 8, first_test_frac: fl
 
 def print_validation(m: dict, rules: dict, baselines: dict) -> None:
     rr = setups.TP_ATR / setups.SL_ATR
-    print(f"\n📊 Evidence 1 -- do the setups beat entering on a random day? (rule level, month-clustered, net of {setups.COST_PCT}% costs)")
-    print(f"   barriers: target {setups.TP_ATR:g} ATR / stop {setups.SL_ATR:g} ATR / {setups.MAX_HOLD} bars "
+    logging.info(f"\n📊 Evidence 1 -- do the setups beat entering on a random day? (rule level, month-clustered, net of {setups.COST_PCT}% costs)")
+    logging.info(f"   barriers: target {setups.TP_ATR:g} ATR / stop {setups.SL_ATR:g} ATR / {setups.MAX_HOLD} bars "
           f"(break-even win rate {1/(1+rr):.0%} before costs); any-day win rate: long {baselines['long']:.1%}, short {baselines['short']:.1%}")
-    print(f"   gate: n >= {MIN_RULE_N}, months >= {MIN_RULE_MONTHS}, lift >= {MIN_LIFT_R}R, t >= {RULE_MIN_T}, net R > 0")
-    print(f"   {'setup':<15} {'n':>4} {'win%':>6} {'anyday':>7} {'netR':>6} {'anyR':>6} {'liftR':>6} {'t':>5}  trusted")
+    logging.info(f"   gate: n >= {MIN_RULE_N}, months >= {MIN_RULE_MONTHS}, lift >= {MIN_LIFT_R}R, t >= {RULE_MIN_T}, net R > 0")
+    logging.info(f"   {'setup':<15} {'n':>4} {'win%':>6} {'anyday':>7} {'netR':>6} {'anyR':>6} {'liftR':>6} {'t':>5}  trusted")
     for s, v in rules.items():
         f = lambda x, fmt: (fmt % x) if np.isfinite(x) else "  n/a"
-        print(f"   {s:<15} {v['n']:>4} {f(v['win_rate']*100,'%5.1f'):>6} {f(v['any_win_rate']*100,'%6.1f'):>7} "
+        logging.info(f"   {s:<15} {v['n']:>4} {f(v['win_rate']*100,'%5.1f'):>6} {f(v['any_win_rate']*100,'%6.1f'):>7} "
               f"{f(v['net_R'],'%+5.2f'):>6} {f(v['any_net_R'],'%+5.2f'):>6} {f(v['lift_R'],'%+5.2f'):>6} {f(v['t_lift'],'%4.1f'):>5}  "
               f"{'YES' if v['trusted'] else 'no'}")
-    print(f"\n📊 Evidence 2 -- can the model pick better instances WITHIN a setup? (walk-forward by date, purged)")
-    print(f"   labelled setups: {m['n_rows']}   scorable folds: {m['n_folds']} (need {MIN_FOLDS})   gate: mean IC >= {MIN_IC_EDGE}, t >= {MIN_T_STAT}")
-    print(f"   IC (prediction vs realised R, within setup) by fold: {m['ic_by_fold']}")
-    print(f"   mean IC {m['ic_mean']:+.3f}  t {m['t_stat']:.2f}  (win-rate AUC {m['auc_mean']:.3f}, Brier skill {m['brier_skill_mean']:+.3f}, "
+    logging.info(f"\n📊 Evidence 2 -- can the model pick better instances WITHIN a setup? (walk-forward by date, purged)")
+    logging.info(f"   labelled setups: {m['n_rows']}   scorable folds: {m['n_folds']} (need {MIN_FOLDS})   gate: mean IC >= {MIN_IC_EDGE}, t >= {MIN_T_STAT}")
+    logging.info(f"   IC (prediction vs realised R, within setup) by fold: {m['ic_by_fold']}")
+    logging.info(f"   mean IC {m['ic_mean']:+.3f}  t {m['t_stat']:.2f}  (win-rate AUC {m['auc_mean']:.3f}, Brier skill {m['brier_skill_mean']:+.3f}, "
           f"calibration slope {m['calib_b']:.2f})  trust {m['trust_weight']:.2f}  -> {'TRUSTED' if m['trusted'] else 'NOT trusted'}")
-    print()
+    logging.info()
 
 
 def rule_validation(D: pd.DataFrame, A: pd.DataFrame) -> dict:

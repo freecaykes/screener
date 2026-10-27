@@ -4,6 +4,7 @@ from typing import Callable, Dict, Any
 
 import numpy as np
 import pandas as pd
+import logging
 
 
 @dataclass
@@ -59,7 +60,7 @@ class Backtester:
         all_trades = []
         start_idx = train_period
 
-        print(f"Starting Walk-Forward Analysis | Train: {train_period} days | Test: {test_period} days")
+        logging.info(f"Starting Walk-Forward Analysis | Train: {train_period} days | Test: {test_period} days")
 
         while start_idx + test_period <= len(data):
             train_end = start_idx
@@ -71,11 +72,11 @@ class Backtester:
             window_start = data.index[train_end]
             window_end = data.index[test_end - 1]
 
-            print(f"Window {len(results) + 1}: Training until {window_start.date()} | Testing {window_end.date()}")
+            logging.info(f"Window {len(results) + 1}: Training until {window_start.date()} | Testing {window_end.date()}")
 
             # Retrain model if needed (important for your XGBoost + sentiment strategy)
             if retrain and 'model' in strategy_kwargs:
-                print("   → Retraining model...")
+                logging.info("   → Retraining model...")
                 # You can pass a retrain function or handle inside strategy_func
 
             # Run test period
@@ -203,15 +204,15 @@ class Backtester:
 
 
 def print_backtest_results(result: BacktestResult):
-    print("\n" + "=" * 60)
-    print("BACKTEST RESULTS")
-    print("=" * 60)
-    print(f"Total Return     : {result.total_return * 100:8.2f}%")
-    print(f"CAGR             : {result.cagr * 100:8.2f}%")
-    print(f"Sharpe Ratio     : {result.sharpe_ratio:8.2f}")
-    print(f"Sortino Ratio    : {result.sortino_ratio:8.2f}")
-    print(f"Max Drawdown     : {result.max_drawdown * 100:8.2f}%")
-    print(f"Win Rate         : {result.win_rate * 100:8.2f}%")
-    print(f"Profit Factor    : {result.profit_factor:8.2f}")
-    print(f"Number of Trades : {result.num_trades:8d}")
-    print("=" * 60)
+    logging.info("\n" + "=" * 60)
+    logging.info("BACKTEST RESULTS")
+    logging.info("=" * 60)
+    logging.info(f"Total Return     : {result.total_return * 100:8.2f}%")
+    logging.info(f"CAGR             : {result.cagr * 100:8.2f}%")
+    logging.info(f"Sharpe Ratio     : {result.sharpe_ratio:8.2f}")
+    logging.info(f"Sortino Ratio    : {result.sortino_ratio:8.2f}")
+    logging.info(f"Max Drawdown     : {result.max_drawdown * 100:8.2f}%")
+    logging.info(f"Win Rate         : {result.win_rate * 100:8.2f}%")
+    logging.info(f"Profit Factor    : {result.profit_factor:8.2f}")
+    logging.info(f"Number of Trades : {result.num_trades:8d}")
+    logging.info("=" * 60)

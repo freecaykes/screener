@@ -310,7 +310,6 @@ def print_validation(m: dict, rules: dict, baselines: dict) -> None:
     logging.info(f"   IC (prediction vs realised R, within setup) by fold: {m['ic_by_fold']}")
     logging.info(f"   mean IC {m['ic_mean']:+.3f}  t {m['t_stat']:.2f}  (win-rate AUC {m['auc_mean']:.3f}, Brier skill {m['brier_skill_mean']:+.3f}, "
           f"calibration slope {m['calib_b']:.2f})  trust {m['trust_weight']:.2f}  -> {'TRUSTED' if m['trusted'] else 'NOT trusted'}")
-    logging.info()
 
 
 def rule_validation(D: pd.DataFrame, A: pd.DataFrame) -> dict:

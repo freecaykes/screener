@@ -17,10 +17,15 @@
 # =============================================================================
 import asyncio
 import math
+import os
 import time
 from datetime import datetime, time as dtime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+import logging
+
+LOGLEVEL = os.environ.get('LOGLEVEL', 'INFO').upper()
+logging.basicConfig(level=LOGLEVEL, format="%(asctime)s %(message)s")
 
 import warnings
 
@@ -31,7 +36,7 @@ warnings.filterwarnings(
 )
 
 import yfinance as yf
-import logging
+
 
 from train import train
 from agent import decision, newsfeed
@@ -211,6 +216,8 @@ async def main():
 
 
 if __name__ == "__main__":
+    load_config()
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

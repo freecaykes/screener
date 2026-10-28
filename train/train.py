@@ -14,6 +14,8 @@
 import os
 from typing import Optional
 import logging
+LOGLEVEL = os.environ.get('LOGLEVEL', 'INFO').upper()
+logging.basicConfig(level=LOGLEVEL, format="%(asctime)s %(message)s")
 
 import joblib
 import pandas as pd

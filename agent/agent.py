@@ -12,7 +12,10 @@ warnings.filterwarnings(
     message=r".*deprecated*",
     module=r"yfinance",
 )
+
 import logging
+LOGLEVEL = os.environ.get('LOGLEVEL', 'INFO').upper()
+logging.basicConfig(level=LOGLEVEL, format="%(asctime)s %(message)s")
 
 import yfinance as yf
 from langchain.chat_models import init_chat_model

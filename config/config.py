@@ -191,10 +191,12 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         raise FileNotFoundError(f"Config file not found: {config_path}")
     with config_path.open("rb") as fh:
         raw = tomllib.load(fh)
+    
+    loglevel = os.environ.get('LOGLEVEL', 'INFO').upper()
+    logging.basicConfig(level=loglevel, format="%(asctime)s %(message)s")
+
     return _build(Config, raw)
 
 
 if __name__ == "__main__":
-    from pprint import pprint
-
-    plogging.info(load_config())
+    logging.info(load_config())

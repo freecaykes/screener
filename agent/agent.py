@@ -14,8 +14,6 @@ warnings.filterwarnings(
 )
 
 import logging
-LOGLEVEL = os.environ.get('LOGLEVEL', 'INFO').upper()
-logging.basicConfig(level=LOGLEVEL, format="%(asctime)s %(message)s")
 
 import yfinance as yf
 from langchain.chat_models import init_chat_model
@@ -27,7 +25,9 @@ from typing_extensions import TypedDict, Optional, Any
 
 from agent import decision, newsfeed
 from train import features, setup_model, setups, train
+from config import get_config
 
+cfg = get_config()
 
 NEWS_FETCH_TIMEOUT_SEC = 30
 
@@ -114,7 +114,7 @@ class TickerAgent:
 
         self.workflow = workflow
         self.app = self.workflow.compile()
-        logging.info("✅ TickerAgent workflow compiled.")
+        logging.info(f"✅ TickerAgent workflow compiled.")
 
     async def run(self, ticker: str) -> AgentState:
         logging.info(f"🚀 Running agent for {ticker}...")
@@ -176,7 +176,7 @@ class TickerAgent:
 
         latest = table.iloc[-1]
         state["price_data"] = prices
-        state["as_of"] = table.index[-1].date().isoformat()
+        state["as_o"] = table.index[-1].date().isoformat()
         state["setup"] = str(latest["setup"])
         state["indicators"] = {c: float(latest[c]) for c in setups.SETUP_FEATURES}  # days_to_earn may be NaN
         state["indicators"]["Close"] = float(latest["Close"])
@@ -191,8 +191,8 @@ class TickerAgent:
         state["p_info"] = setup_model.predict_final(bundle, state["indicators"], state["setup"])
         p = state["p_info"]
         logging.info(f"   [{state['ticker']}] {state['setup']}: p(any day)={p['p_any']:.2f}  p(setup)={p['p_setup']:.2f}  "
-              f"-> p(final)={p['p_final']:.2f}  (setup trust {p['setup_trust']:.2f}, model trust {p['model_trust']:.2f}, "
-              f"validated={p['validated']})")
+              "-> p(final)={p['p_final']:.2f}  (setup trust {p['setup_trust']:.2f}, model trust {p['model_trust']:.2f}, "
+              "validated={p['validated']})")
         return state
 
     _SETUP_BRIEF = {
@@ -213,7 +213,7 @@ class TickerAgent:
         if not state.get("setup"):
             return state
         logging.info(f"   [node] reading news for {state['ticker']} in the context of {state['setup']}...")
-        prompt = f"""You are assisting a swing trader looking at {state['ticker']}.
+        prompt = """You are assisting a swing trader looking at {state['ticker']}.
 Active setup: {self._SETUP_BRIEF[state['setup']]}
 
 Headlines: {' | '.join(state['headlines'])}
@@ -269,7 +269,7 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
         """BUY / SELL only when a setup is active, it has out-of-sample support, and the expected value
         after costs clears the bar (agent/decision.py). Otherwise HOLD -- with the setup, its plan and
         the reason shown if one is active."""
-        logging.info("_generate_signal")
+        logging.info(f"_generate_signal")
         ind = state.get("indicators") or {}
         if not ind:  # data outage / too little history: say so, rather than "no setup"
             state["signal"], state["signal_confidence"], state["signal_score"] = "HOLD", 0.0, 0.0
@@ -280,7 +280,7 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
             p_info=state.get("p_info"),
             atr_pct=ind.get("atr_pct"),
             last_close=ind.get("Close"),
-            as_of=state.get("as_of"),
+            as_of=state.get("as_o"),
             news=state.get("news_analysis"),
             params=decision.load_params(),
             days_to_earn=ind.get("days_to_earn"),

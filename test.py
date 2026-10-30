@@ -123,7 +123,7 @@ def sentiment_analysis(state: AgentState) -> AgentState:
         state["sentiment_score"] = 0.0
         return state
 
-    prompt = f"""
+    prompt = """
     You are a professional financial sentiment analyst.
     Analyze ONLY the impact of this headline on the stock price of {state["ticker"]}.
     Return a single number between -1.0 (strongly negative) and +1.0 (strongly positive).
@@ -202,7 +202,7 @@ def load_or_train_xgboost(tickers: list[str]) -> XGBRegressor:
         logging.info(f"✅ Loading existing XGBoost model from {model_path}")
         return joblib.load(model_path)
 
-    logging.info("🚀 Training new XGBoost model on 2 years of historical data...")
+    logging.info(f"🚀 Training new XGBoost model on 2 years of historical data...")
     all_X = []
     all_y = []
 
@@ -312,11 +312,11 @@ if __name__ == "__main__":
 
     logging.info(f"\n🚀 All {len(TICKERS)} LangGraph agents running in parallel!")
     logging.info(f"   Polling every {POLL_INTERVAL_SEC} seconds for new Yahoo Finance news.")
-    logging.info("   Press Ctrl+C to stop.\n")
+    logging.info(f"   Press Ctrl+C to stop.\n")
 
     # Keep main thread alive
     try:
         while True:
             time.sleep(60)
     except KeyboardInterrupt:
-        logging.info("\n👋 Shutting down all agents... Goodbye!")
+        logging.info(f"\n👋 Shutting down all agents... Goodbye!")

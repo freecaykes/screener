@@ -51,7 +51,7 @@ REQUIRE_SKILL = True          # False = use every horizon regardless of validati
 # Targets / models
 # ---------------------------------------------------------------------------
 def target_cols() -> list[str]:
-    return [f"target_delta_{h}" for h in HORIZONS]
+    return ["target_delta_{h}" for h in HORIZONS]
 
 
 def add_horizon_targets(df: pd.DataFrame) -> pd.DataFrame:
@@ -69,7 +69,7 @@ def add_horizon_targets(df: pd.DataFrame) -> pd.DataFrame:
         move = df["Close"].shift(-h) / df["Close"] - 1.0
         if "Bench" in df.columns:
             move = move - (df["Bench"].shift(-h) / df["Bench"] - 1.0)
-        df[f"target_delta_{h}"] = move * 100.0
+        df["target_delta_{h}"] = move * 100.0
     return df
 
 
@@ -92,13 +92,13 @@ def fit_horizon_models(D: pd.DataFrame, feature_cols: list[str], min_rows: int =
     """Fit one model per horizon on the whole dataset D (features + target_delta_* columns)."""
     models: dict[int, XGBRegressor] = {}
     for h in HORIZONS:
-        col = f"target_delta_{h}"
+        col = "target_delta_{h}"
         sub = D[D[col].notna()]
         if len(sub) < min_rows:
             continue
         models[h] = make_regressor().fit(sub[feature_cols], sub[col])
     if BASE_HORIZON not in models:
-        raise ValueError(f"Not enough data to train the base {BASE_HORIZON}-day model")
+        raise ValueError("Not enough data to train the base {BASE_HORIZON}-day model")
     return models
 
 
@@ -136,7 +136,7 @@ def walk_forward_validate(
 
     out: dict[int, dict] = {}
     for h in HORIZONS:
-        col = f"target_delta_{h}"
+        col = "target_delta_{h}"
         ics: list[float] = []
         hits: list[float] = []
         ups: list[float] = []
@@ -211,7 +211,7 @@ def trusted_horizons(metrics: dict[int, dict]) -> list[int]:
 
 
 def print_validation(metrics: dict[int, dict]) -> None:
-    logging.info("\nWalk-forward validation (purged, expanding window)")
+    logging.info(f"\nWalk-forward validation (purged, expanding window)")
     logging.info(f"   gate: mean IC >= {MIN_IC} and t-stat across folds >= {MIN_T_STAT}")
     logging.info(f"   {'h':>3} {'IC':>8} {'t':>6} {'folds>0':>8} {'hit%':>6} {'up%':>6} {'beta':>5} {'w':>5} {'n_test':>8}  trusted")
     for h in HORIZONS:
@@ -219,8 +219,8 @@ def print_validation(metrics: dict[int, dict]) -> None:
         if not m:
             continue
         logging.info(
-            f"   {h:>3} {m['ic_mean']:>8.4f} {m['t_stat']:>6.2f} {m['pos_frac']:>8.0%} {m['hit_rate']:>6.1%} "
-            f"{m['base_up']:>6.1%} {m['calib_beta']:>5.2f} {m['trust_weight']:>5.2f} {m['n_test']:>8}  {'YES' if m['trusted'] else 'no'}"
+            "   {h:>3} {m['ic_mean']:>8.4f} {m['t_stat']:>6.2f} {m['pos_frac']:>8.0%} {m['hit_rate']:>6.1%} "
+            "{m['base_up']:>6.1%} {m['calib_beta']:>5.2f} {m['trust_weight']:>5.2f} {m['n_test']:>8}  {'YES' if m['trusted'] else 'no'}"
         )
     t = trusted_horizons(metrics)
     logging.info(f"   -> trusted horizons: {t if t else 'NONE (timing output will be withheld)'}\n")
@@ -289,8 +289,8 @@ def build_manifest(curve: dict[int, float], trusted: list[int], as_of) -> dict:
         return {
             "reliable": False,
             "reason": (
-                f"only {len(used)} horizon(s) passed out-of-sample validation "
-                f"(need {MIN_TRUSTED_HORIZONS})"
+                "only {len(used)} horizon(s) passed out-of-sample validation "
+                "(need {MIN_TRUSTED_HORIZONS})"
             ),
         }
     return summarize_curve({h: curve[h] for h in used}, as_of)

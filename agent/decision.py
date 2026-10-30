@@ -83,7 +83,7 @@ def news_effect(setup: str, news: Optional[dict]) -> dict:
     thesis = str(news.get("thesis", "unclear"))
     against = (d > 0 and thesis == "damaged") or (d < 0 and thesis == "improved")
     veto = bool(against and mat >= VETO_MATERIALITY)
-    why = f"news says the thesis is '{thesis}' (materiality {mat:.2f}) -- against this {'buy' if d > 0 else 'sell'}" if veto else ""
+    why = "news says the thesis is '{thesis}' (materiality {mat:.2f}) -- against this {'buy' if d > 0 else 'sell'}" if veto else ""
     return {"strength": d * sent * (0.5 + 0.5 * mat), "veto": veto, "why": why}
 
 
@@ -118,7 +118,7 @@ def decide(
 
     rr = setups.TP_ATR / setups.SL_ATR
     plan = {
-        "entry_ref": round(float(last_close), 4),
+        "entry_re": round(float(last_close), 4),
         "stop": round(float(last_close * (1 - d * setups.SL_ATR * atr_pct / 100)), 4),
         "target": round(float(last_close * (1 + d * setups.TP_ATR * atr_pct / 100)), 4),
         "stop_pct": round(setups.SL_ATR * atr_pct, 2),
@@ -138,7 +138,7 @@ def decide(
                       "news_strength": round(eff["strength"], 3), "ev_R": None}
 
     if days_to_earn is not None and np.isfinite(days_to_earn) and 0 <= days_to_earn <= EARNINGS_BLACKOUT_CAL_DAYS:
-        return _hold(f"earnings in {days_to_earn:.0f} day(s): inside the {setups.MAX_HOLD}-bar hold window", **base, **log_fields, watch=True)
+        return _hold("earnings in {days_to_earn:.0f} day(s): inside the {setups.MAX_HOLD}-bar hold window", **base, **log_fields, watch=True)
     if p_info is None:
         return _hold("setup active but no model/evidence available", **base, watch=True)
     if eff["veto"]:
@@ -160,7 +160,7 @@ def decide(
         "p_pre_news": round(p_pre, 3), "p_final": round(p, 3),
         "news": news, "news_strength": round(eff["strength"], 3),
         "gamma": round(gamma, 3),
-        "gamma_source": params.get("source", "prior") + (f" (n={params['n']})" if params.get("n") else ""),
+        "gamma_source": params.get("source", "prior") + (" (n={params['n']})" if params.get("n") else ""),
         "r_nonwin": round(r_nw, 3), "cost_R": round(cost_r, 3), "ev_R": round(ev, 3),
         "validated": validated, "watch": False,
     }
@@ -171,7 +171,7 @@ def decide(
         return {"signal": label, "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 
     why = ("setup active but not validated out-of-sample (evidence too thin to act on)" if not validated
-           else f"expected value {ev:+.2f}R is below the {MIN_EV_R}R bar")
+           else "expected value {ev:+.2f}R is below the {MIN_EV_R}R bar")
     detail.update(reason=why, watch=True)
     return {"signal": "HOLD", "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 
@@ -205,7 +205,7 @@ def record(state: dict, out: dict, path: str = LOG_PATH) -> None:
         news = d.get("news") or {}
         row = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "ticker": state.get("ticker"), "as_of": state.get("as_of"),
+            "ticker": state.get("ticker"), "as_o": state.get("as_o"),
             "setup": d["setup"], "direction": d["direction"], "atr_pct": state.get("indicators", {}).get("atr_pct"),
             "p_pre_news": d["p_pre_news"], "news_strength": d["news_strength"],
             "sentiment": news.get("sentiment"), "thesis": news.get("thesis"), "materiality": news.get("materiality"),
@@ -245,8 +245,8 @@ def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> li
     """
     uniq: dict[tuple, dict] = {}
     for r in rows:  # newest log entry wins for the same ticker/day/setup
-        uniq[(r.get("ticker"), r.get("as_of"), r.get("setup"))] = r
-    ordered = sorted(uniq.values(), key=lambda r: (str(r.get("ticker")), str(r.get("as_of"))))
+        uniq[(r.get("ticker"), r.get("as_o"), r.get("setup"))] = r
+    ordered = sorted(uniq.values(), key=lambda r: (str(r.get("ticker")), str(r.get("as_o"))))
 
     ohlc: dict[str, Optional[pd.DataFrame]] = {}
     last_kept: dict[tuple, int] = {}
@@ -262,9 +262,9 @@ def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> li
                 ohlc[tkr] = None
         df = ohlc[tkr]
         atr_pct = r.get("atr_pct")
-        if df is None or not r.get("as_of") or atr_pct is None:
+        if df is None or not r.get("as_o") or atr_pct is None:
             continue
-        i = int(df.index.get_indexer([pd.Timestamp(r["as_of"])])[0])
+        i = int(df.index.get_indexer([pd.Timestamp(r["as_o"])])[0])
         if i < 0:
             continue
         key = (tkr, r.get("direction"))

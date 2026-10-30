@@ -24,9 +24,6 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 import logging
 
-LOGLEVEL = os.environ.get('LOGLEVEL', 'INFO').upper()
-logging.basicConfig(level=LOGLEVEL, format="%(asctime)s %(message)s")
-
 import warnings
 
 warnings.filterwarnings(
@@ -39,8 +36,10 @@ import yfinance as yf
 
 
 from train import train
-from agent import decision, newsfeed
-from agent.agent import TickerAgent
+from agent import decision, newsfeed,TickerAgent
+from config import get_config
+
+cfg = get_config()
 
 # =============================================================================
 # CONFIGURATION
@@ -73,8 +72,8 @@ def seconds_until_next_scan(now: Optional[datetime] = None) -> float:
 def print_result(ticker: str, result: dict) -> None:
     ind = result.get("indicators") or {}
     d = result.get("signal_detail") or {}
-    logging.info(f"\{ticker} @ {time.strftime('%H:%M:%S')}  (last completed session: {result.get('as_of', 'n/a')}, "
-          f"vs {result.get('benchmark', 'benchmark')})")
+    logging.info(f"{ticker} @ {time.strftime('%H:%M:%S')}  (last completed session: {result.get('as_of', 'n/a')}, "
+          "vs {result.get('benchmark', 'benchmark')})")
     logging.info(f"   Headline : {' | '.join(result.get('headlines') or ['(none)'])[:100]}")
     dte = ind.get("days_to_earn")
     if dte is not None and math.isfinite(dte):
@@ -88,27 +87,27 @@ def print_result(ticker: str, result: dict) -> None:
             logging.info(f"   Setup    : none active -> HOLD")
         return
     if setup in ("breakout_buy", "breakdown_sell"):
-        what = (f"closed {ind.get('bo_atr', float('nan')):.1f} ATR through the 20-day {'high' if setup == 'breakout_buy' else 'low'} "
-                f"on {ind.get('rel_volume', float('nan')):.1f}x volume")
+        what = ("closed {ind.get('bo_atr', float('nan')):.1f} ATR through the 20-day {'high' if setup == 'breakout_buy' else 'low'} "
+                "on {ind.get('rel_volume', float('nan')):.1f}x volume")
     else:
-        what = (f"{'dip' if setup == 'pullback_buy' else 'rally'} of {ind.get('depth_atr', float('nan')):.1f} ATR from the 10-day "
-                f"{'high' if setup == 'pullback_buy' else 'low'}, reversal candle today")
+        what = ("{'dip' if setup == 'pullback_buy' else 'rally'} of {ind.get('depth_atr', float('nan')):.1f} ATR from the 10-day "
+                "{'high' if setup == 'pullback_buy' else 'low'}, reversal candle today")
     logging.info(f"   Setup    : {setup.upper()}  ({what}; ATR {ind.get('atr_pct', float('nan')):.2f}% of price)")
 
     news = d.get("news") or result.get("news_analysis")
     if news:
         logging.info(f"   News     : sentiment {news['sentiment']:+.2f}, thesis '{news['thesis']}', materiality {news['materiality']:.2f}"
-              f" -- {news.get('reason', '')}")
+              " -- {news.get('reason', '')}")
     if "p_final" in d:
         logging.info(f"   Odds     : any-day {d['p_any']:.0%} -> this setup {d['p_setup']:.0%} -> final {d['p_final']:.0%} "
-              f"(setup evidence {d['setup_trust']:.2f}, model {d['model_trust']:.2f}, news weight {d['gamma']:.2f} [{d['gamma_source']}])")
+              "(setup evidence {d['setup_trust']:.2f}, model {d['model_trust']:.2f}, news weight {d['gamma']:.2f} [{d['gamma_source']}])")
         logging.info(f"   Value    : EV {d['ev_R']:+.2f}R per trade after {d['cost_R']:.2f}R costs  "
-              f"({'validated' if d['validated'] else 'NOT validated out-of-sample'})")
+              "({'validated' if d['validated'] else 'NOT validated out-of-sample'})")
     plan = d.get("plan")
     if plan:
         verb = "Buy" if d.get("direction", 1) > 0 else "Sell/short"
         logging.info(f"   Plan     : {verb} near {plan['entry_ref']:.2f} | stop {plan['stop']:.2f} ({plan['stop_pct']:.1f}%) | "
-              f"target {plan['target']:.2f} ({plan['target_pct']:.1f}%) | exit by {plan['max_hold_date']}")
+              "target {plan['target']:.2f} ({plan['target_pct']:.1f}%) | exit by {plan['max_hold_date']}")
     if result["signal"] == "HOLD":
         tag = "WATCH" if d.get("watch") else "HOLD"
         logging.info(f"   Signal   : **HOLD** [{tag}] {d.get('reason', '')}")
@@ -161,7 +160,7 @@ async def news_source():
     logging.info(f"News director started — checking every {NEWS_POLL_INTERVAL_SEC}s")
 
     while True:
-        for ticker in TICKERS:
+        for ticker in cfg.general.tickers:
             headline = await latest_headline(ticker)
             if not headline:
                 logging.info(f"[{ticker}] no new headline) running on LLM-found headline")
@@ -181,7 +180,7 @@ async def daily_scan():
         wait = seconds_until_next_scan()
         logging.info(f"🗓️  next daily scan in {wait/3600:.1f}h")
         await asyncio.sleep(wait)
-        for ticker in TICKERS:
+        for ticker in cfg.general.tickers:
             logging.info(f"🗓️  [daily scan] queueing {ticker}")
             await QUEUE.put(ticker)
         await asyncio.sleep(60)  # don't fire twice for the same minute
@@ -196,11 +195,11 @@ def _report_task_death(task: asyncio.Task) -> None:
 async def main():
     # Training downloads ~10y per ticker, finds the setups and validates them, so keep it off the
     # event loop. (Cached after the first run; retrains if tickers, features or strategy change.)
-    await asyncio.to_thread(train.xgboost, TICKERS)
+    await asyncio.to_thread(train.xgboost, cfg.general.tickers)
     # Learn the news weight from past logged calls whose stop/target outcomes have since played out.
     params = await asyncio.to_thread(decision.refit_news)
     logging.info(f"🧮 news weight: {params['news_gamma']:.3f} log-odds per +1.0 "
-          f"({params['source']}, n={params['n']}, sd={params['news_gamma_sd']:.3f})")
+          "({params['source']}, n={params['n']}, sd={params['news_gamma_sd']:.3f})")
     ticker_agent = TickerAgent("gemini-3.8-flash", 0.0)
 
     consumers = [
@@ -215,10 +214,8 @@ async def main():
     await asyncio.gather(producer, scanner, *consumers, return_exceptions=True)
 
 
-if __name__ == "__main__":
-    load_config()
-    
+if __name__ == "__main__":    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("\nAsync agent shut down gracefully.")
+        logging.info(f"\nAsync agent shut down gracefully.")

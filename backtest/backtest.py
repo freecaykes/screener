@@ -76,7 +76,7 @@ class Backtester:
 
             # Retrain model if needed (important for your XGBoost + sentiment strategy)
             if retrain and 'model' in strategy_kwargs:
-                logging.info("   → Retraining model...")
+                logging.info(f"   → Retraining model...")
                 # You can pass a retrain function or handle inside strategy_func
 
             # Run test period
@@ -204,9 +204,9 @@ class Backtester:
 
 
 def print_backtest_results(result: BacktestResult):
-    logging.info("\n" + "=" * 60)
-    logging.info("BACKTEST RESULTS")
-    logging.info("=" * 60)
+    logging.info(f"\n" + "=" * 60)
+    logging.info(f"BACKTEST RESULTS")
+    logging.info(f"=" * 60)
     logging.info(f"Total Return     : {result.total_return * 100:8.2f}%")
     logging.info(f"CAGR             : {result.cagr * 100:8.2f}%")
     logging.info(f"Sharpe Ratio     : {result.sharpe_ratio:8.2f}")
@@ -215,4 +215,4 @@ def print_backtest_results(result: BacktestResult):
     logging.info(f"Win Rate         : {result.win_rate * 100:8.2f}%")
     logging.info(f"Profit Factor    : {result.profit_factor:8.2f}")
     logging.info(f"Number of Trades : {result.num_trades:8d}")
-    logging.info("=" * 60)
+    logging.info(f"=" * 60)

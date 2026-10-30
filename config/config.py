@@ -14,6 +14,7 @@ Secrets are never read from the TOML. Put API keys in .env (the VS Code
 launch config loads it) and use `cfg.llm.api_key` to read the right one.
 """
 from __future__ import annotations
+from functools import lru_cache
 
 import os
 import sys
@@ -50,10 +51,13 @@ DEFAULT_KEY_ENV = {
 @dataclass(frozen=True)
 class GeneralConfig:
     tickers: list[str] = field(default_factory=lambda: ["NOW"])
+    logging_level: str = "WARN"
 
     def __post_init__(self) -> None:
         if not self.tickers or not all(isinstance(t, str) and t for t in self.tickers):
             raise ValueError("general.tickers must be a non-empty list of strings")
+        logging.basicConfig(level=self.logging_level.upper(), format="%(asctime)s %(message)s")
+        
 
 
 @dataclass(frozen=True)
@@ -66,7 +70,7 @@ class RuntimeConfig:
     def __post_init__(self) -> None:
         for name in ("news_poll_interval_sec", "news_fetch_timeout_sec", "news_limit", "max_concurrent"):
             if getattr(self, name) < 1:
-                raise ValueError(f"runtime.{name} must be >= 1")
+                raise ValueError("runtime.{name} must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -78,7 +82,7 @@ class LLMConfig:
 
     def __post_init__(self) -> None:
         if self.provider not in DEFAULT_KEY_ENV:
-            raise ValueError(f"llm.provider must be one of {sorted(DEFAULT_KEY_ENV)}")
+            raise ValueError("llm.provider must be one of {sorted(DEFAULT_KEY_ENV)}")
         if not 0.0 <= self.temperature <= 2.0:
             raise ValueError("llm.temperature must be between 0 and 2")
 
@@ -91,7 +95,7 @@ class LLMConfig:
         """Read the API key from the environment (.env), never from the TOML."""
         value = os.environ.get(self.api_key_var)
         if not value:
-            raise RuntimeError(f"Environment variable {self.api_key_var} is not set")
+            raise RuntimeError("Environment variable {self.api_key_var} is not set")
         return value
 
 
@@ -112,19 +116,19 @@ class IndicatorsConfig:
 
     @property
     def macd_col(self) -> str:
-        return f"MACD_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}"
+        return "MACD_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}"
 
     @property
     def macd_signal_col(self) -> str:
-        return f"MACDs_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}"
+        return "MACDs_{self.macd_fast}_{self.macd_slow}_{self.macd_signal}"
 
     @property
     def bb_mid_col(self) -> str:
-        return f"BBM_{self.bbands_length}_{float(self.bbands_std)}"
+        return "BBM_{self.bbands_length}_{float(self.bbands_std)}"
 
     @property
     def bb_bandwidth_col(self) -> str:
-        return f"BBB_{self.bbands_length}_{float(self.bbands_std)}"
+        return "BBB_{self.bbands_length}_{float(self.bbands_std)}"
 
 
 @dataclass(frozen=True)
@@ -172,13 +176,13 @@ def _build(cls: type[T], raw: dict[str, Any], path: str = "") -> T:
     known = {f.name for f in fields(cls)}
     unknown = set(raw) - known
     if unknown:
-        raise KeyError(f"Unknown config key(s) in [{path or cls.__name__}]: {sorted(unknown)}")
+        raise KeyError("Unknown config key(s) in [{path or cls.__name__}]: {sorted(unknown)}")
 
     kwargs: dict[str, Any] = {}
     for name, value in raw.items():
         ftype = hints[name]
         if is_dataclass(ftype) and isinstance(value, dict):
-            kwargs[name] = _build(ftype, value, f"{path}.{name}" if path else name)
+            kwargs[name] = _build(ftype, value, "{path}.{name}" if path else name)
         else:
             kwargs[name] = value
     return cls(**kwargs)
@@ -188,14 +192,16 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     """Read a TOML file and return a validated, immutable Config."""
     config_path = Path(path or os.environ.get(ENV_VAR) or DEFAULT_CONFIG_PATH)
     if not config_path.is_file():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+        raise FileNotFoundError("Config file not found: {config_path}")
     with config_path.open("rb") as fh:
         raw = tomllib.load(fh)
     
-    loglevel = os.environ.get('LOGLEVEL', 'INFO').upper()
-    logging.basicConfig(level=loglevel, format="%(asctime)s %(message)s")
 
     return _build(Config, raw)
+
+@lru_cache(maxsize=1)
+def get_config() -> Config:
+    return load_config()
 
 
 if __name__ == "__main__":

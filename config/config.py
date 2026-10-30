@@ -56,8 +56,12 @@ class GeneralConfig:
     def __post_init__(self) -> None:
         if not self.tickers or not all(isinstance(t, str) and t for t in self.tickers):
             raise ValueError("general.tickers must be a non-empty list of strings")
-        logging.basicConfig(level=self.logging_level.upper(), format="%(asctime)s %(message)s")
-        
+            
+        logging.basicConfig(
+            level=self.logging_level.upper(),
+            format='%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
+            datefmt='%Y-%m-%dT%H:%M:%S'
+        )
 
 
 @dataclass(frozen=True)

@@ -2,8 +2,8 @@
 # Secrets (the API key) do NOT go here: put them in .env and name the variable below.
 
 [general]
-tickers = ["SOFI"]
-logging_level = "DEBUG"
+tickers = ["AMZN","GOOG"]
+logging_level = "INFO"
 
 [runtime]
 news_poll_interval_sec = 300   # how often to check Yahoo Finance for new headlines

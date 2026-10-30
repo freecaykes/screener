@@ -17,7 +17,6 @@
 # =============================================================================
 import asyncio
 import math
-import os
 import time
 from datetime import datetime, time as dtime, timedelta
 from typing import Optional
@@ -42,26 +41,19 @@ from config import get_config
 cfg = get_config()
 
 # =============================================================================
-# CONFIGURATION
-# =============================================================================
-TICKERS = ["META", "NVDA"]  # your hand-picked list: the model learns from exactly these tickers (and nothing else)
-
-# =============================================================================
 # CONCURRENT TICKER PROCESSOR (with semaphore)
 # =============================================================================
 QUEUE: asyncio.Queue = asyncio.Queue()
-NEWS_POLL_INTERVAL_SEC = 300
 LAST_HEADLINES: dict[str, str] = {}
-MAX_CONCURRENT = 5
-NEWS_FETCH_TIMEOUT_SEC = 30   # a hung yfinance call no longer stalls the loop silently
-SCAN_TIME = dtime(16, 10)     # New York time: daily scan, just after the close (bars are complete by 16:05)
+
+_SCAN_TIME = dtime(16, 10)     # New York time: daily scan, just after the close (bars are complete by 16:05)
 _NY = ZoneInfo("America/New_York")
 
 
 def seconds_until_next_scan(now: Optional[datetime] = None) -> float:
     """Seconds until the next weekday SCAN_TIME (New York). Holidays still scan; they just see no new bar."""
     now = (now or datetime.now(_NY)).astimezone(_NY)
-    target = datetime.combine(now.date(), SCAN_TIME, tzinfo=_NY)
+    target = datetime.combine(now.date(), _SCAN_TIME, tzinfo=_NY)
     if now >= target:
         target += timedelta(days=1)
     while target.weekday() >= 5:
@@ -103,7 +95,10 @@ def print_result(ticker: str, result: dict) -> None:
               "(setup evidence {d['setup_trust']:.2f}, model {d['model_trust']:.2f}, news weight {d['gamma']:.2f} [{d['gamma_source']}])")
         logging.info(f"   Value    : EV {d['ev_R']:+.2f}R per trade after {d['cost_R']:.2f}R costs  "
               "({'validated' if d['validated'] else 'NOT validated out-of-sample'})")
+
     plan = d.get("plan")
+    printf("DEBUG: ----- {plan}")
+
     if plan:
         verb = "Buy" if d.get("direction", 1) > 0 else "Sell/short"
         logging.info(f"   Plan     : {verb} near {plan['entry_ref']:.2f} | stop {plan['stop']:.2f} ({plan['stop_pct']:.1f}%) | "
@@ -119,11 +114,11 @@ async def consumer(id: int, ticker_agent: TickerAgent):
     while True:
         ticker = await QUEUE.get()
         try:
-            logging.info(f"🔧 Worker {id} started processing {ticker}")
+            logging.info(f"Worker {id} started processing {ticker}")
             result = await ticker_agent.run(ticker)
             print_result(ticker, result)
         except Exception as e:
-            logging.info(f"❌ Error processing {ticker}: {e}")
+            logging.info(f"Error processing {ticker}: {e}")
         finally:
             QUEUE.task_done()
 
@@ -134,10 +129,10 @@ async def latest_headline(ticker: str) -> Optional[str]:
         # NOTE: on timeout the worker thread keeps running in the background (threads
         # can't be killed), but the loop moves on instead of waiting forever.
         items = await asyncio.wait_for(
-            asyncio.to_thread(newsfeed.fetch_news, ticker, 1), timeout=NEWS_FETCH_TIMEOUT_SEC
+            asyncio.to_thread(newsfeed.fetch_news, ticker, 1), timeout=cfg.runtime.news_fetch_timeout_sec
         )
     except asyncio.TimeoutError:
-        logging.info(f"[{ticker}] news fetch timed out after {NEWS_FETCH_TIMEOUT_SEC}s")
+        logging.info(f"[{ticker}] news fetch timed out after {cfg.runtime.news_fetch_timeout_sec}s")
         return None
     except Exception as e:
         logging.info(f"[{ticker}] news fetch failed: {type(e).__name__}: {e}")
@@ -157,7 +152,7 @@ async def latest_headline(ticker: str) -> Optional[str]:
 
 
 async def news_source():
-    logging.info(f"News director started — checking every {NEWS_POLL_INTERVAL_SEC}s")
+    logging.info(f"News director started — checking every {cfg.runtime.news_poll_interval_sec}s")
 
     while True:
         for ticker in cfg.general.tickers:
@@ -171,17 +166,17 @@ async def news_source():
                 LAST_HEADLINES[ticker] = headline
                 
             await QUEUE.put(ticker)
-        await asyncio.sleep(NEWS_POLL_INTERVAL_SEC)
+        await asyncio.sleep(cfg.runtime.news_poll_interval_sec)
 
 
 async def daily_scan():
     """Queue every ticker once a day just after the close, when the day's bar is complete."""
     while True:
         wait = seconds_until_next_scan()
-        logging.info(f"🗓️  next daily scan in {wait/3600:.1f}h")
+        logging.info(f"next daily scan in {wait/3600:.1f}h")
         await asyncio.sleep(wait)
         for ticker in cfg.general.tickers:
-            logging.info(f"🗓️  [daily scan] queueing {ticker}")
+            logging.info(f"[daily scan] queueing {ticker}")
             await QUEUE.put(ticker)
         await asyncio.sleep(60)  # don't fire twice for the same minute
 
@@ -198,13 +193,13 @@ async def main():
     await asyncio.to_thread(train.xgboost, cfg.general.tickers)
     # Learn the news weight from past logged calls whose stop/target outcomes have since played out.
     params = await asyncio.to_thread(decision.refit_news)
-    logging.info(f"🧮 news weight: {params['news_gamma']:.3f} log-odds per +1.0 "
+    logging.info(f"news weight: {params['news_gamma']:.3f} log-odds per +1.0 "
           "({params['source']}, n={params['n']}, sd={params['news_gamma_sd']:.3f})")
-    ticker_agent = TickerAgent("gemini-3.8-flash", 0.0)
+    ticker_agent = TickerAgent(cfg.llm.model, cfg.llm.temperature)
 
     consumers = [
         asyncio.create_task(consumer(i, ticker_agent))
-        for i in range(MAX_CONCURRENT)
+        for i in range(cfg.runtime.max_concurrent)
     ]
     producer = asyncio.create_task(news_source())
     scanner = asyncio.create_task(daily_scan())

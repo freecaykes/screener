@@ -108,10 +108,10 @@ def build_dataset(tickers: list[str], period: Optional[str] = None):
             earnings = features.fetch_earnings_dates(tkr)
             table = setups.build_setup_table(prices, vix, benches[features.benchmark_for(tkr)], earnings)
         except Exception as e:
-            logging.info(f"  ⚠️  {tkr}: skipped ({e})")
+            logging.info(f"  {tkr}: skipped ({e})")
             continue
         if table.empty:
-            logging.info(f"  ⚠️  {tkr}: no usable rows, skipped")
+            logging.info(f"  {tkr}: no usable rows, skipped")
             continue
 
         for d in (1.0, -1.0):  # what entering on a random day would have done, same barriers
@@ -302,14 +302,11 @@ def print_validation(m: dict, rules: dict, baselines: dict) -> None:
     logging.info(f"   {'setup':<15} {'n':>4} {'win%':>6} {'anyday':>7} {'netR':>6} {'anyR':>6} {'liftR':>6} {'t':>5}  trusted")
     for s, v in rules.items():
         f = lambda x, fmt: (fmt % x) if np.isfinite(x) else "  n/a"
-        logging.info(f"   {s:<15} {v['n']:>4} {f(v['win_rate']*100,'%5.1f'):>6} {f(v['any_win_rate']*100,'%6.1f'):>7} "
-              "{f(v['net_R'],'%+5.2f'):>6} {f(v['any_net_R'],'%+5.2f'):>6} {f(v['lift_R'],'%+5.2f'):>6} {f(v['t_lift'],'%4.1f'):>5}  "
-              "{'YES' if v['trusted'] else 'no'}")
+        logging.info(f"   {s:<15} {v['n']:>4} {f(v['win_rate']*100,'%5.1f'):>6} {f(v['any_win_rate']*100,'%6.1f'):>7} {f(v['net_R'],'%+5.2f'):>6} {f(v['any_net_R'],'%+5.2f'):>6} {f(v['lift_R'],'%+5.2f'):>6} {f(v['t_lift'],'%4.1f'):>5} {'YES' if v['trusted'] else 'no'}")
     logging.info(f"Evidence 2 -- can the model pick better instances WITHIN a setup? (walk-forward by date, purged)")
     logging.info(f"   labelled setups: {m['n_rows']}   scorable folds: {m['n_folds']} (need {MIN_FOLDS})   gate: mean IC >= {MIN_IC_EDGE}, t >= {MIN_T_STAT}")
     logging.info(f"   IC (prediction vs realised R, within setup) by fold: {m['ic_by_fold']}")
-    logging.info(f"   mean IC {m['ic_mean']:+.3f}  t {m['t_stat']:.2f}  (win-rate AUC {m['auc_mean']:.3f}, Brier skill {m['brier_skill_mean']:+.3f}, "
-          "calibration slope {m['calib_b']:.2f})  trust {m['trust_weight']:.2f}  -> {'TRUSTED' if m['trusted'] else 'NOT trusted'}")
+    logging.info(f"   mean IC {m['ic_mean']:+.3f}  t {m['t_stat']:.2f}  (win-rate AUC {m['auc_mean']:.3f}, Brier skill {m['brier_skill_mean']:+.3f}, calibration slope {m['calib_b']:.2f})  trust {m['trust_weight']:.2f}  -> {'TRUSTED' if m['trusted'] else 'NOT trusted'}")
 
 
 def rule_validation(D: pd.DataFrame, A: pd.DataFrame) -> dict:

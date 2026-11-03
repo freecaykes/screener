@@ -79,30 +79,23 @@ def print_result(ticker: str, result: dict) -> None:
             logging.info(f"   Setup    : none active -> HOLD")
         return
     if setup in ("breakout_buy", "breakdown_sell"):
-        what = ("closed {ind.get('bo_atr', float('nan')):.1f} ATR through the 20-day {'high' if setup == 'breakout_buy' else 'low'} "
-                "on {ind.get('rel_volume', float('nan')):.1f}x volume")
+        what = (f"closed {ind.get('bo_atr', float('nan')):.1f} ATR through the 20-day {'high' if setup == 'breakout_buy' else 'low'} on {ind.get('rel_volume', float('nan')):.1f}x volume")
     else:
-        what = ("{'dip' if setup == 'pullback_buy' else 'rally'} of {ind.get('depth_atr', float('nan')):.1f} ATR from the 10-day "
-                "{'high' if setup == 'pullback_buy' else 'low'}, reversal candle today")
+        what = (f"{'dip' if setup == 'pullback_buy' else 'rally'} of {ind.get('depth_atr', float('nan')):.1f} ATR from the 10-day {'high' if setup == 'pullback_buy' else 'low'}, reversal candle today")
     logging.info(f"   Setup    : {setup.upper()}  ({what}; ATR {ind.get('atr_pct', float('nan')):.2f}% of price)")
 
     news = d.get("news") or result.get("news_analysis")
     if news:
-        logging.info(f"   News     : sentiment {news['sentiment']:+.2f}, thesis '{news['thesis']}', materiality {news['materiality']:.2f}"
-              " -- {news.get('reason', '')}")
+        logging.info(f"   News     : sentiment {news['sentiment']:+.2f}, thesis '{news['thesis']}', materiality {news['materiality']:.2f} -- {news.get('reason', '')}")
     if "p_final" in d:
-        logging.info(f"   Odds     : any-day {d['p_any']:.0%} -> this setup {d['p_setup']:.0%} -> final {d['p_final']:.0%} "
-              "(setup evidence {d['setup_trust']:.2f}, model {d['model_trust']:.2f}, news weight {d['gamma']:.2f} [{d['gamma_source']}])")
-        logging.info(f"   Value    : EV {d['ev_R']:+.2f}R per trade after {d['cost_R']:.2f}R costs  "
-              "({'validated' if d['validated'] else 'NOT validated out-of-sample'})")
+        logging.info(f"   Odds     : any-day {d['p_any']:.0%} -> this setup {d['p_setup']:.0%} -> final {d['p_final']:.0%} (setup evidence {d['setup_trust']:.2f}, model {d['model_trust']:.2f}, news weight {d['gamma']:.2f} [{d['gamma_source']}])")
+        logging.info(f"   Value    : EV {d['ev_R']:+.2f}R per trade after {d['cost_R']:.2f}R costs ({'validated' if d['validated'] else 'NOT validated out-of-sample'})")
 
     plan = d.get("plan")
-    printf("DEBUG: ----- {plan}")
 
     if plan:
         verb = "Buy" if d.get("direction", 1) > 0 else "Sell/short"
-        logging.info(f"   Plan     : {verb} near {plan['entry_ref']:.2f} | stop {plan['stop']:.2f} ({plan['stop_pct']:.1f}%) | "
-              "target {plan['target']:.2f} ({plan['target_pct']:.1f}%) | exit by {plan['max_hold_date']}")
+        logging.info(f"   Plan     : {verb} near {plan['entry_ref']:.2f} | stop {plan['stop']:.2f} ({plan['stop_pct']:.1f}%) | target {plan['target']:.2f} ({plan['target_pct']:.1f}%) | exit by {plan['max_hold_date']}")
     if result["signal"] == "HOLD":
         tag = "WATCH" if d.get("watch") else "HOLD"
         logging.info(f"   Signal   : **HOLD** [{tag}] {d.get('reason', '')}")

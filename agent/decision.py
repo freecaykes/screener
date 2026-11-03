@@ -83,7 +83,7 @@ def news_effect(setup: str, news: Optional[dict]) -> dict:
     thesis = str(news.get("thesis", "unclear"))
     against = (d > 0 and thesis == "damaged") or (d < 0 and thesis == "improved")
     veto = bool(against and mat >= VETO_MATERIALITY)
-    why = "news says the thesis is '{thesis}' (materiality {mat:.2f}) -- against this {'buy' if d > 0 else 'sell'}" if veto else ""
+    why = f"news says the thesis is '{thesis}' (materiality {mat:.2f}) -- against this {'buy' if d > 0 else 'sell'}" if veto else ""
     return {"strength": d * sent * (0.5 + 0.5 * mat), "veto": veto, "why": why}
 
 
@@ -111,14 +111,14 @@ def decide(
     """
     params = params or DEFAULT_PARAMS
     if not setup:
-        return _hold("no setup active")
+        return _hold(f"no setup active")
     d = 1.0 if setup in _BUYS else -1.0
     if atr_pct is None or not np.isfinite(atr_pct) or atr_pct <= 0 or last_close is None:
-        return _hold("no volatility estimate (indicators unavailable)", setup=setup)
+        return _hold(f"no volatility estimate (indicators unavailable)", setup=setup)
 
     rr = setups.TP_ATR / setups.SL_ATR
     plan = {
-        "entry_re": round(float(last_close), 4),
+        "entry_ref": round(float(last_close), 4),
         "stop": round(float(last_close * (1 - d * setups.SL_ATR * atr_pct / 100)), 4),
         "target": round(float(last_close * (1 + d * setups.TP_ATR * atr_pct / 100)), 4),
         "stop_pct": round(setups.SL_ATR * atr_pct, 2),
@@ -138,11 +138,11 @@ def decide(
                       "news_strength": round(eff["strength"], 3), "ev_R": None}
 
     if days_to_earn is not None and np.isfinite(days_to_earn) and 0 <= days_to_earn <= EARNINGS_BLACKOUT_CAL_DAYS:
-        return _hold("earnings in {days_to_earn:.0f} day(s): inside the {setups.MAX_HOLD}-bar hold window", **base, **log_fields, watch=True)
+        return _hold(f"earnings in {days_to_earn:.0f} day(s): inside the {setups.MAX_HOLD}-bar hold window", **base, **log_fields, watch=True)
     if p_info is None:
-        return _hold("setup active but no model/evidence available", **base, watch=True)
+        return _hold(f"setup active but no model/evidence available", **base, watch=True)
     if eff["veto"]:
-        return _hold("NEWS VETO: " + eff["why"], **base, **log_fields, watch=True)
+        return _hold(f"NEWS VETO: " + eff["why"], **base, **log_fields, watch=True)
 
     p_pre = float(p_info["p_final"])
     p = _sigmoid(_logit(p_pre) + gamma * eff["strength"])

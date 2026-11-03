@@ -39,5 +39,4 @@ def normalize(item) -> dict:
 
 def fetch_news(ticker: str, limit: int = 5) -> list:
     """Raw yfinance news items (possibly empty). Blocking: call via asyncio.to_thread."""
-    logging.info()
     return list(yf.Ticker(ticker).news or [])[:limit]

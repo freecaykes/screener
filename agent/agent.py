@@ -126,11 +126,13 @@ class TickerAgent:
             raise
 
     async def _fetch_news(self, state: AgentState) -> AgentState:
-        logging.info(f"   [node] fetching news for {state['ticker']}...")
+        logging.info(f"  [node] fetching news for {state['ticker']}")
         try:
             state["news"] = await asyncio.wait_for(
-                asyncio.to_thread(newsfeed.fetch_news, state["ticker"], self.newsLimit),
-                timeout=cfg.runtime.news_fetch_timeout_sec,
+                asyncio.to_thread(newsfeed.fetch_news, 
+                state["ticker"], 
+                self.newsLimit),
+                timeout=cfg.runtime.news_fetch_timeout_sec
             )
         except asyncio.TimeoutError:
             logging.error(f"   news fetch timed out after {cfg.runtime.news_fetch_timeout_sec}s for {state['ticker']}")
@@ -188,9 +190,7 @@ class TickerAgent:
             return state
         state["p_info"] = setup_model.predict_final(bundle, state["indicators"], state["setup"])
         p = state["p_info"]
-        logging.info(f"   [{state['ticker']}] {state['setup']}: p(any day)={p['p_any']:.2f}  p(setup)={p['p_setup']:.2f}  "
-              "-> p(final)={p['p_final']:.2f}  (setup trust {p['setup_trust']:.2f}, model trust {p['model_trust']:.2f}, "
-              "validated={p['validated']})")
+        logging.info(f"   [{state['ticker']}] {state['setup']}: p(any day)={p['p_any']:.2f}  p(setup)={p['p_setup']:.2f}-> p(final)={p['p_final']:.2f}  (setup trust {p['setup_trust']:.2f}, model trust {p['model_trust']:.2f}, validated={p['validated']})")
         return state
 
     _SETUP_BRIEF = {
@@ -211,7 +211,8 @@ class TickerAgent:
         if not state.get("setup"):
             return state
         logging.info(f"   [node] reading news for {state['ticker']} in the context of {state['setup']}...")
-        prompt = """You are assisting a swing trader looking at {state['ticker']}.
+        prompt = """
+        You are assisting a swing trader looking at {state['ticker']}.
 Active setup: {self._SETUP_BRIEF[state['setup']]}
 
 Headlines: {' | '.join(state['headlines'])}
@@ -220,7 +221,8 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
 {{"sentiment": <number from -1 (very negative for the stock) to 1 (very positive)>,
  "thesis": "improved" | "intact" | "damaged" | "unclear"   (effect of this news on the company's business outlook),
  "materiality": <number 0 to 1: how much this could lastingly change the outlook; 0 = noise>,
- "reason": "<one short sentence>"}}"""
+ "reason": "<one short sentence>"}}
+        """
 
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
         state["news_analysis"] = self._parse_news(self._response_text(response))

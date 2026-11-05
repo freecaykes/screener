@@ -134,7 +134,7 @@ def build_setup_table(
     d = np.select([setup == "pullback_buy", setup == "breakout_buy", setup == "rally_sell", setup == "breakdown_sell"],
                   [1.0, 1.0, -1.0, -1.0], default=0.0)
     ds = pd.Series(d, index=close.index)
-    buy = ds > 0
+    buy setup= ds > 0
 
     hi252 = close.rolling(252, min_periods=252).max()
     lo252 = close.rolling(252, min_periods=252).min()

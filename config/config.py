@@ -52,6 +52,8 @@ DEFAULT_KEY_ENV = {
 class GeneralConfig:
     tickers: list[str] = field(default_factory=lambda: ["NOW"])
     logging_level: str = "WARN"
+    notification_host: str = ""
+    notification_topic: str = ""
 
     def __post_init__(self) -> None:
         if not self.tickers or not all(isinstance(t, str) and t for t in self.tickers):

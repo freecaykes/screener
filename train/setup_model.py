@@ -22,18 +22,21 @@ so expect the gate to reject often. That is the correct answer when there isn't 
 from __future__ import annotations
 
 from typing import Optional
+import logging
 
 import numpy as np
 import pandas as pd
 from xgboost import XGBClassifier
-import logging
 
 from train import features, setups
 from train.setups import SETUP_FEATURES
 
 # ---- gate (tune these) --------------------------------------------------------
-MIN_IC_EDGE = 0.03       # mean out-of-sample rank correlation (prediction vs realised R, within setup) at least this
-MIN_T_STAT = 2.5         # ... and mean(IC) / stderr across folds must reach this
+# Measured on synthetic data (independent market paths): at t>=2.5 / IC>=0.03 this gate falsely trusted pure
+# noise 5-8% of the time; at t>=3.0 / IC>=0.04 it did so 0-2% of the time. It has LITTLE POWER either way
+# (it is diluted over all days), so treat it as a backstop. The rule-level gate below does the real work.
+MIN_IC_EDGE = 0.04       # mean out-of-sample rank correlation (prediction vs realised R, within setup) at least this
+MIN_T_STAT = 3.0         # ... and mean(IC) / stderr across folds must reach this
 MIN_FOLDS = 5            # ... with at least this many scorable folds
 MIN_TRAIN_ROWS = 100
 MIN_TEST_ROWS = 12
@@ -44,7 +47,24 @@ BASE_SHRINK_N = 30       # a setup type with fewer rows than this leans on the p
 MIN_RULE_N = 30          # labelled occurrences of the setup
 MIN_RULE_MONTHS = 12     # distinct calendar months containing the setup
 MIN_LIFT_R = 0.10        # net-of-cost lift over the any-day baseline, in R (stop distances)
-RULE_MIN_T = 2.0         # month-clustered t-stat of that lift
+RULE_MIN_T = 2.5         # month-clustered t-stat of that lift (raised from 2.0: there are now 8 testable groups)
+
+# Match buckets (cut from the real distribution: the median day's best match is ~0.75, so a bucket
+# starting at 0.75 would hold ~40% of days and mean nothing).
+CLOSE_MATCH = 0.90
+PARTIAL_MATCH = 0.75
+BUCKETS = ["hard", "close", "partial", "weak"]
+VALIDATABLE_BUCKETS = ("hard", "close")   # partial/weak matches claim no setup edge; only the model can validate them
+
+
+def bucket_of(match: float, hard) -> str:
+    if hard:
+        return "hard"
+    return "close" if match >= CLOSE_MATCH else ("partial" if match >= PARTIAL_MATCH else "weak")
+
+
+def key_of(setup: str, bucket: str) -> str:
+    return f"{setup}|{bucket}"
 
 
 # ---------------------------------------------------------------------------
@@ -83,12 +103,14 @@ def predict_p(model, X: pd.DataFrame) -> np.ndarray:
 # Dataset
 # ---------------------------------------------------------------------------
 def build_dataset(tickers: list[str], period: Optional[str] = None):
-    """Pooled labelled setups for YOUR tickers only, plus the any-day control group.
+    """Pooled labelled days for YOUR tickers only, plus the any-day control group.
 
-    Returns (D, A). D has one row per setup occurrence: date, ticker, setup, SETUP_FEATURES,
-    y (target-before-stop), R (result in stop-distance units), bars. A has one row per (ticker, day,
-    direction): what entering on ANY day with the same barriers would have done -- the thing a setup
-    has to beat (quality stocks drift up, so a long can win with no timing skill at all).
+    Every usable day is a row: its best-matching setup (always one of the four), how fully formed it is
+    (`match`, and `bucket`: hard / close / partial / weak), the direction-normalised features, and the
+    outcome of a trade in that setup's direction (y = target before stop, R = result in stop distances).
+    A has one row per (ticker, day, direction): what entering on ANY day would have done with the same
+    barriers -- the thing every group has to beat (quality stocks drift up, so a long can win with no
+    timing skill at all).
     """
     period = period or "10y"
     vix = features.fetch_vix(period)
@@ -98,7 +120,7 @@ def build_dataset(tickers: list[str], period: Optional[str] = None):
     for sym in sorted({features.benchmark_for(t) for t in tickers}):
         hist = features.fetch_history(sym, period)
         if hist.empty:
-            raise RuntimeError("Could not download benchmark {sym}.")
+            raise RuntimeError(f"Could not download benchmark {sym}.")
         benches[sym] = hist["Close"]
 
     frames, any_frames = [], []
@@ -108,10 +130,10 @@ def build_dataset(tickers: list[str], period: Optional[str] = None):
             earnings = features.fetch_earnings_dates(tkr)
             table = setups.build_setup_table(prices, vix, benches[features.benchmark_for(tkr)], earnings)
         except Exception as e:
-            logging.info(f"  {tkr}: skipped ({e})")
+            logging.info(f"  ⚠️  {tkr}: skipped ({e})")
             continue
         if table.empty:
-            logging.info(f"  {tkr}: no usable rows, skipped")
+            logging.info(f"  ⚠️  {tkr}: no usable rows, skipped")
             continue
 
         for d in (1.0, -1.0):  # what entering on a random day would have done, same barriers
@@ -120,14 +142,16 @@ def build_dataset(tickers: list[str], period: Optional[str] = None):
             lab_a["ticker"], lab_a["date"] = tkr, lab_a.index
             any_frames.append(lab_a.reset_index(drop=True))
 
-        lab = setups.label_rows(prices, table[table["setup"] != ""])
+        lab = setups.label_rows(prices, table)
         lab["ticker"], lab["date"] = tkr, lab.index
+        lab["bucket"] = np.select([lab["hard"] == 1, lab["match"] >= CLOSE_MATCH, lab["match"] >= PARTIAL_MATCH],
+                                  ["hard", "close", "partial"], default="weak")
         frames.append(lab.reset_index(drop=True))
-        counts = lab["setup"].value_counts().to_dict()
-        logging.info(f"  → {tkr}: {len(lab)} labelled setups {counts}")
+        logging.info(f"  → {tkr}: {len(lab)} labelled days; strict setups (hard) {int((lab['hard'] == 1).sum())}, "
+              f"close {int((lab['bucket'] == 'close').sum())}")
 
     if not frames:
-        raise ValueError("No setups found for the given tickers")
+        raise ValueError("No usable data for the given tickers")
     return pd.concat(frames, ignore_index=True), pd.concat(any_frames, ignore_index=True)
 
 
@@ -295,22 +319,30 @@ def walk_forward_validate(D: pd.DataFrame, n_folds: int = 8, first_test_frac: fl
 
 def print_validation(m: dict, rules: dict, baselines: dict) -> None:
     rr = setups.TP_ATR / setups.SL_ATR
-    logging.info(f"Evidence 1 -- do the setups beat entering on a random day? (rule level, month-clustered, net of {setups.COST_PCT}% costs)")
+    logging.info(f"\n📊 Evidence 1 -- does each setup, at each level of match, beat entering on a random day? "
+          f"(month-clustered, net of {setups.COST_PCT}% costs)")
     logging.info(f"   barriers: target {setups.TP_ATR:g} ATR / stop {setups.SL_ATR:g} ATR / {setups.MAX_HOLD} bars "
-          "(break-even win rate {1/(1+rr):.0%} before costs); any-day win rate: long {baselines['long']:.1%}, short {baselines['short']:.1%}")
-    logging.info(f"   gate: n >= {MIN_RULE_N}, months >= {MIN_RULE_MONTHS}, lift >= {MIN_LIFT_R}R, t >= {RULE_MIN_T}, net R > 0")
-    logging.info(f"   {'setup':<15} {'n':>4} {'win%':>6} {'anyday':>7} {'netR':>6} {'anyR':>6} {'liftR':>6} {'t':>5}  trusted")
-    for s, v in rules.items():
-        f = lambda x, fmt: (fmt % x) if np.isfinite(x) else "  n/a"
-        logging.info(f"   {s:<15} {v['n']:>4} {f(v['win_rate']*100,'%5.1f'):>6} {f(v['any_win_rate']*100,'%6.1f'):>7} {f(v['net_R'],'%+5.2f'):>6} {f(v['any_net_R'],'%+5.2f'):>6} {f(v['lift_R'],'%+5.2f'):>6} {f(v['t_lift'],'%4.1f'):>5} {'YES' if v['trusted'] else 'no'}")
-    logging.info(f"Evidence 2 -- can the model pick better instances WITHIN a setup? (walk-forward by date, purged)")
-    logging.info(f"   labelled setups: {m['n_rows']}   scorable folds: {m['n_folds']} (need {MIN_FOLDS})   gate: mean IC >= {MIN_IC_EDGE}, t >= {MIN_T_STAT}")
+          f"(break-even win rate {1/(1+rr):.0%} before costs); any-day win rate: long {baselines['long']:.1%}, short {baselines['short']:.1%}")
+    logging.info(f"   only 'hard' (all conditions met) and 'close' (match >= {CLOSE_MATCH}) can be validated this way; "
+          f"gate: n >= {MIN_RULE_N}, months >= {MIN_RULE_MONTHS}, lift >= {MIN_LIFT_R}R, t >= {RULE_MIN_T}, net R > 0")
+    logging.info(f"   {'group':<24} {'n':>5} {'win%':>6} {'anyday':>7} {'netR':>6} {'anyR':>6} {'liftR':>6} {'t':>5}  trusted")
+    f = lambda x, fmt: (fmt % x) if np.isfinite(x) else "  n/a"
+    for key, v in rules.items():
+        if v["n"] == 0:
+            continue
+        flag = "YES" if v["trusted"] else ("no" if v["testable"] else "(not testable)")
+        logging.info(f"   {key:<24} {v['n']:>5} {f(v['win_rate']*100,'%5.1f'):>6} {f(v['any_win_rate']*100,'%6.1f'):>7} "
+              f"{f(v['net_R'],'%+5.2f'):>6} {f(v['any_net_R'],'%+5.2f'):>6} {f(v['lift_R'],'%+5.2f'):>6} {f(v['t_lift'],'%4.1f'):>5}  {flag}")
+    logging.info(f"\n📊 Evidence 2 -- can the model pick better days WITHIN a setup? (walk-forward by date, purged)")
+    logging.info(f"   labelled days: {m['n_rows']}   scorable folds: {m['n_folds']} (need {MIN_FOLDS})   gate: mean IC >= {MIN_IC_EDGE}, t >= {MIN_T_STAT}")
     logging.info(f"   IC (prediction vs realised R, within setup) by fold: {m['ic_by_fold']}")
-    logging.info(f"   mean IC {m['ic_mean']:+.3f}  t {m['t_stat']:.2f}  (win-rate AUC {m['auc_mean']:.3f}, Brier skill {m['brier_skill_mean']:+.3f}, calibration slope {m['calib_b']:.2f})  trust {m['trust_weight']:.2f}  -> {'TRUSTED' if m['trusted'] else 'NOT trusted'}")
+    logging.info(f"   mean IC {m['ic_mean']:+.3f}  t {m['t_stat']:.2f}  (win-rate AUC {m['auc_mean']:.3f}, Brier skill {m['brier_skill_mean']:+.3f}, "
+          f"calibration slope {m['calib_b']:.2f})  trust {m['trust_weight']:.2f}  -> {'TRUSTED' if m['trusted'] else 'NOT trusted'}")
+    print()
 
 
 def rule_validation(D: pd.DataFrame, A: pd.DataFrame) -> dict:
-    """Does each setup beat entering on a random day? (no model involved)
+    """Does each (setup, match bucket) beat entering on a random day? (no model involved)
 
     The setup rules have no fitted parameters, so their whole history is a fair test. Results are in
     R (units of the stop distance), net of the cost assumption.
@@ -322,56 +354,67 @@ def rule_validation(D: pd.DataFrame, A: pd.DataFrame) -> dict:
 
     Significance: trades overlap in time and tickers move together, so the standard error is
     cluster-robust by calendar month (clusters are summed before squaring), not the naive n.
+
+    Only the 'hard' and 'close' buckets can be validated this way. 'partial' and 'weak' days are by
+    definition not the setup, so no setup edge is claimed for them (their numbers are still reported).
     """
     out = {}
     for s in setups.SETUPS:
         d = 1.0 if s in ("pullback_buy", "breakout_buy") else -1.0
-        r, a = D[D["setup"] == s], A[A["direction"] == d]
-        res = {"n": int(len(r)), "months": 0, "win_rate": float("nan"),
-               "any_win_rate": float(a["y"].mean()) if len(a) else float("nan"),
-               "net_R": float("nan"), "any_net_R": float("nan"), "lift_R": float("nan"), "t_lift": float("nan"),
-               "trusted": False, "trust_weight": 0.0}
-        if len(r) and len(a):
-            net = lambda f: f["R"] - setups.COST_PCT / (setups.SL_ATR * f["atr_pct"])
-            base = float(net(a).mean())
-            e = (net(r) - base).to_numpy()
-            ym = r["date"].dt.to_period("M").to_numpy()
-            lift = float(e.mean())
-            sums = pd.Series(e - lift).groupby(ym).sum()          # centred cluster sums
-            m = len(sums)
-            se = float(np.sqrt((sums ** 2).sum() * m / max(m - 1, 1)) / len(e)) if m >= 2 else float("nan")
-            res.update(win_rate=float(r["y"].mean()), net_R=float(net(r).mean()), any_net_R=base,
-                       months=int(m), lift_R=lift, t_lift=float(lift / se) if se and se > 0 else float("nan"))
-            ok = np.isfinite(res["t_lift"])
-            res["trusted"] = bool(ok and res["n"] >= MIN_RULE_N and m >= MIN_RULE_MONTHS
-                                  and lift >= MIN_LIFT_R and res["t_lift"] >= RULE_MIN_T and res["net_R"] > 0)
-            if ok and m >= MIN_RULE_MONTHS and lift > 0:
-                res["trust_weight"] = float(np.clip(res["t_lift"] / RULE_MIN_T, 0.0, 1.0))
-        out[s] = res
+        a = A[A["direction"] == d]
+        for b in BUCKETS:
+            r = D[(D["setup"] == s) & (D["bucket"] == b)]
+            testable = b in VALIDATABLE_BUCKETS
+            res = {"n": int(len(r)), "months": 0, "testable": testable, "win_rate": float("nan"),
+                   "any_win_rate": float(a["y"].mean()) if len(a) else float("nan"),
+                   "net_R": float("nan"), "any_net_R": float("nan"), "lift_R": float("nan"), "t_lift": float("nan"),
+                   "trusted": False, "trust_weight": 0.0}
+            if len(r) and len(a):
+                net = lambda f: f["R"] - setups.COST_PCT / (setups.SL_ATR * f["atr_pct"])
+                base = float(net(a).mean())
+                e = (net(r) - base).to_numpy()
+                ym = r["date"].dt.to_period("M").to_numpy()
+                lift = float(e.mean())
+                sums = pd.Series(e - lift).groupby(ym).sum()          # centred cluster sums
+                m = len(sums)
+                se = float(np.sqrt((sums ** 2).sum() * m / max(m - 1, 1)) / len(e)) if m >= 2 else float("nan")
+                res.update(win_rate=float(r["y"].mean()), net_R=float(net(r).mean()), any_net_R=base,
+                           months=int(m), lift_R=lift, t_lift=float(lift / se) if se and se > 0 else float("nan"))
+                ok = np.isfinite(res["t_lift"]) and testable
+                res["trusted"] = bool(ok and res["n"] >= MIN_RULE_N and m >= MIN_RULE_MONTHS
+                                      and lift >= MIN_LIFT_R and res["t_lift"] >= RULE_MIN_T and res["net_R"] > 0)
+                if ok and m >= MIN_RULE_MONTHS and lift > 0:
+                    res["trust_weight"] = float(np.clip(res["t_lift"] / RULE_MIN_T, 0.0, 1.0))
+            out[key_of(s, b)] = res
     return out
 
 
 # ---------------------------------------------------------------------------
 # Inference
 # ---------------------------------------------------------------------------
-def predict_final(bundle: dict, x: dict, setup: str) -> dict:
-    """Probability that THIS setup reaches its target before its stop, built from evidence in layers.
+def predict_final(bundle: dict, x: dict, setup: str, hard: bool = False) -> dict:
+    """Probability that THIS trade reaches its target before its stop, built from evidence in layers.
 
+    group     (setup, match bucket) the day falls in, e.g. "pullback_buy|close"
     p_any     win rate of entering on a random day in this direction (the no-edge anchor)
-    p_setup   the setup's own historical win rate (shrunk toward the pooled rate when rare)
-    p_anchor  p_any + u * (p_setup - p_any)         u = rule-level trust weight (0..1)
-    p_model   the classifier, recalibrated out-of-sample (Platt); its deviation from p_setup is the
-              within-setup adjustment, counted in proportion to the model trust weight w
-    p_final = p_anchor + w * (p_cal - p_setup)
+    p_group   that group's own historical win rate (shrunk toward p_any when the group is rare)
+    p_anchor  p_any + u * (p_group - p_any)         u = rule-level trust weight of the group (0..1)
+    p_model   the classifier, recalibrated out-of-sample (Platt); its deviation from p_group is the
+              within-group adjustment, counted in proportion to the model trust weight w
+    p_final = p_anchor + w * (p_cal - p_group)
 
-    With no evidence for either layer this collapses to the any-day win rate (no edge claimed).
+    With no evidence for either layer this collapses to the any-day win rate (no edge claimed), however
+    good the pattern looks.
     """
     m, rules = bundle["metrics"], bundle["rules"]
     is_long = setup in ("pullback_buy", "breakout_buy")
     p_any = bundle["baselines"]["long" if is_long else "short"]
-    p_setup = float(m["base_by_setup"].get(setup, m["base_pooled"]))
-    u = float(rules.get(setup, {}).get("trust_weight", 0.0))
-    p_anchor = p_any + u * (p_setup - p_any)
+    bucket = bucket_of(float(x["match"]), bool(hard))
+    r = rules.get(key_of(setup, bucket), {})
+    n, win = r.get("n", 0), r.get("win_rate", float("nan"))
+    p_group = float((n * win + BASE_SHRINK_N * p_any) / (n + BASE_SHRINK_N)) if n and np.isfinite(win) else float(p_any)
+    u = float(r.get("trust_weight", 0.0))
+    p_anchor = p_any + u * (p_group - p_any)
 
     p_raw = p_cal = float("nan"); w = 0.0; adj = 0.0
     if bundle.get("model") is not None:
@@ -379,11 +422,11 @@ def predict_final(bundle: dict, x: dict, setup: str) -> dict:
         p_raw = float(predict_p(bundle["model"], X)[0])
         p_cal = float(_sigmoid(m["calib_a"] + m["calib_b"] * _logit(p_raw)))
         w = float(m["trust_weight"])
-        adj = w * (p_cal - p_setup)
+        adj = w * (p_cal - p_group)
     return {
-        "p_any": p_any, "p_setup": p_setup, "p_raw": p_raw, "p_cal": p_cal,
+        "bucket": bucket, "p_any": p_any, "p_group": p_group, "p_raw": p_raw, "p_cal": p_cal,
         "setup_trust": u, "model_trust": w,
         "p_final": float(np.clip(p_anchor + adj, 0.01, 0.99)),
         "r_nonwin": float(m["r_nonwin_by_setup"].get(setup, m["r_nonwin_pooled"])),
-        "validated": bool(rules.get(setup, {}).get("trusted", False) or m["trusted"]),
+        "validated": bool(r.get("trusted", False) or m["trusted"]),
     }

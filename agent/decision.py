@@ -1,8 +1,11 @@
 """
 agent/decision.py -- BUY / SELL / HOLD for the swing setups, with every number traceable.
 
-A signal needs a SETUP (pullback_buy / breakout_buy / rally_sell / breakdown_sell, from train/setups.py).
-No setup -> HOLD. When one is active:
+Every day has a SETUP: the best-matching of pullback_buy / breakout_buy / rally_sell / breakdown_sell
+(train/setups.py), with a match score from 0 to 1 (1 = the strict rule is fully met) and a list of what is
+missing. How much a partial match is worth is decided by evidence, not assumed: the probability below
+is anchored on what days with that setup AND that level of match have actually done on your tickers.
+(Without a setup at all, i.e. missing data, the signal is HOLD.)
 
   p_final   probability the trade reaches its profit target before its stop within MAX_HOLD bars,
             from train/setup_model.predict_final (layered evidence, each layer weighted by how much
@@ -34,10 +37,6 @@ from typing import Callable, Optional
 import logging
 
 import numpy as np
-
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
-
 import pandas as pd
 
 from train import features, setups
@@ -104,6 +103,9 @@ def decide(
     news: Optional[dict] = None,
     params: Optional[dict] = None,
     days_to_earn: Optional[float] = None,
+    match: float = 1.0,
+    hard: bool = True,
+    gaps: Optional[list] = None,
 ) -> dict:
     """Return {'signal', 'confidence', 'score', 'detail'}.
 
@@ -111,10 +113,10 @@ def decide(
     """
     params = params or DEFAULT_PARAMS
     if not setup:
-        return _hold(f"no setup active")
+        return _hold("no setup available (data missing)")
     d = 1.0 if setup in _BUYS else -1.0
     if atr_pct is None or not np.isfinite(atr_pct) or atr_pct <= 0 or last_close is None:
-        return _hold(f"no volatility estimate (indicators unavailable)", setup=setup)
+        return _hold("no volatility estimate (indicators unavailable)", setup=setup)
 
     rr = setups.TP_ATR / setups.SL_ATR
     plan = {
@@ -125,7 +127,10 @@ def decide(
         "target_pct": round(setups.TP_ATR * atr_pct, 2),
         "max_hold_date": setups.add_trading_days(as_of, setups.MAX_HOLD + 1).date().isoformat() if as_of else None,
     }
-    base = {"setup": setup, "direction": int(d), "plan": plan, "rr": rr}
+    bucket = (p_info or {}).get("bucket") or ("hard" if hard else ("close" if match >= 0.9 else ("partial" if match >= 0.75 else "weak")))
+    alert = bucket in ("hard", "close")   # partial / weak matches are context, not alerts
+    base = {"setup": setup, "direction": int(d), "plan": plan, "rr": rr, "match": round(float(match), 3),
+            "hard": bool(hard), "bucket": bucket, "gaps": list(gaps or [])}
 
     # Computed before any early exit so that vetoed / blocked setups are still LOGGED with their probability
     # and news reading: you can later check whether the veto and the blackout actually helped, and the
@@ -138,11 +143,11 @@ def decide(
                       "news_strength": round(eff["strength"], 3), "ev_R": None}
 
     if days_to_earn is not None and np.isfinite(days_to_earn) and 0 <= days_to_earn <= EARNINGS_BLACKOUT_CAL_DAYS:
-        return _hold(f"earnings in {days_to_earn:.0f} day(s): inside the {setups.MAX_HOLD}-bar hold window", **base, **log_fields, watch=True)
+        return _hold(f"earnings in {days_to_earn:.0f} day(s): inside the {setups.MAX_HOLD}-bar hold window", **base, **log_fields, watch=alert)
     if p_info is None:
-        return _hold(f"setup active but no model/evidence available", **base, watch=True)
+        return _hold("setup active but no model/evidence available", **base, watch=alert)
     if eff["veto"]:
-        return _hold(f"NEWS VETO: " + eff["why"], **base, **log_fields, watch=True)
+        return _hold("NEWS VETO: " + eff["why"], **base, **log_fields, watch=alert)
 
     p_pre = float(p_info["p_final"])
     p = _sigmoid(_logit(p_pre) + gamma * eff["strength"])
@@ -154,13 +159,13 @@ def decide(
 
     detail = {
         **base,
-        "p_any": round(p_info["p_any"], 3), "p_setup": round(p_info["p_setup"], 3),
+        "p_any": round(p_info["p_any"], 3), "p_group": round(p_info["p_group"], 3),
         "p_model": None if not np.isfinite(p_info["p_cal"]) else round(p_info["p_cal"], 3),
         "setup_trust": round(p_info["setup_trust"], 2), "model_trust": round(p_info["model_trust"], 2),
         "p_pre_news": round(p_pre, 3), "p_final": round(p, 3),
         "news": news, "news_strength": round(eff["strength"], 3),
         "gamma": round(gamma, 3),
-        "gamma_source": params.get("source", "prior") + (" (n={params['n']})" if params.get("n") else ""),
+        "gamma_source": params.get("source", "prior") + (f" (n={params['n']})" if params.get("n") else ""),
         "r_nonwin": round(r_nw, 3), "cost_R": round(cost_r, 3), "ev_R": round(ev, 3),
         "validated": validated, "watch": False,
     }
@@ -170,9 +175,10 @@ def decide(
         label = ("STRONG " if strong else "") + ("BUY" if d > 0 else "SELL")
         return {"signal": label, "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 
-    why = ("setup active but not validated out-of-sample (evidence too thin to act on)" if not validated
-           else "expected value {ev:+.2f}R is below the {MIN_EV_R}R bar")
-    detail.update(reason=why, watch=True)
+    form = "fully formed" if hard else f"{int(match * 100)}% formed ({bucket})"
+    why = (f"{setup} {form}, but this kind of day is not validated out-of-sample (evidence too thin to act on)" if not validated
+           else f"expected value {ev:+.2f}R is below the {MIN_EV_R}R bar")
+    detail.update(reason=why, watch=alert)
     return {"signal": "HOLD", "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 
 
@@ -205,8 +211,9 @@ def record(state: dict, out: dict, path: str = LOG_PATH) -> None:
         news = d.get("news") or {}
         row = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "ticker": state.get("ticker"), "as_o": state.get("as_o"),
+            "ticker": state.get("ticker"), "as_of": state.get("as_of"),
             "setup": d["setup"], "direction": d["direction"], "atr_pct": state.get("indicators", {}).get("atr_pct"),
+            "match": d.get("match"), "hard": d.get("hard"), "bucket": d.get("bucket"),
             "p_pre_news": d["p_pre_news"], "news_strength": d["news_strength"],
             "sentiment": news.get("sentiment"), "thesis": news.get("thesis"), "materiality": news.get("materiality"),
             "headline": (state.get("headlines") or [""])[0][:160],
@@ -215,7 +222,7 @@ def record(state: dict, out: dict, path: str = LOG_PATH) -> None:
         with open(path, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception as e:
-        logging.info(f"   ⚠️  could not write decision log: {e}")
+        print(f"   ⚠️  could not write decision log: {e}")
 
 
 def read_log(path: str = LOG_PATH) -> list[dict]:
@@ -245,8 +252,8 @@ def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> li
     """
     uniq: dict[tuple, dict] = {}
     for r in rows:  # newest log entry wins for the same ticker/day/setup
-        uniq[(r.get("ticker"), r.get("as_o"), r.get("setup"))] = r
-    ordered = sorted(uniq.values(), key=lambda r: (str(r.get("ticker")), str(r.get("as_o"))))
+        uniq[(r.get("ticker"), r.get("as_of"), r.get("setup"))] = r
+    ordered = sorted(uniq.values(), key=lambda r: (str(r.get("ticker")), str(r.get("as_of"))))
 
     ohlc: dict[str, Optional[pd.DataFrame]] = {}
     last_kept: dict[tuple, int] = {}
@@ -258,13 +265,13 @@ def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> li
                 df = fetch(tkr)
                 ohlc[tkr] = df if df is not None and not df.empty else None
             except Exception as e:
-                logging.info(f"   ⚠️  could not fetch prices for {tkr}: {e}")
+                logging.info(f"   could not fetch prices for {tkr}: {e}")
                 ohlc[tkr] = None
         df = ohlc[tkr]
         atr_pct = r.get("atr_pct")
-        if df is None or not r.get("as_o") or atr_pct is None:
+        if df is None or not r.get("as_of") or atr_pct is None:
             continue
-        i = int(df.index.get_indexer([pd.Timestamp(r["as_o"])])[0])
+        i = int(df.index.get_indexer([pd.Timestamp(r["as_of"])])[0])
         if i < 0:
             continue
         key = (tkr, r.get("direction"))
@@ -303,7 +310,7 @@ def refit_news(log_path: str = LOG_PATH, params_path: str = PARAMS_PATH,
     try:
         labeled = label_outcomes(read_log(log_path), fetch)
     except Exception as e:
-        logging.info(f"   ⚠️  news refit skipped: {type(e).__name__}: {e}")
+        logging.info(f"  news refit skipped: {type(e).__name__}: {e}")
         return params
     labeled = [r for r in labeled if r.get("p_pre_news") and r.get("news_strength") is not None]
     if not labeled:

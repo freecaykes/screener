@@ -3,6 +3,7 @@ import json
 import os
 import re
 from enum import Enum
+
 import pandas as pd
 
 import warnings
@@ -46,7 +47,10 @@ class AgentState(TypedDict):
     indicators: dict            # setup features of the last COMPLETED session (+ Close)
     as_of: str                  # that session's date
     benchmark: str              # reference for the relative-strength features (e.g. SPY)
-    setup: str                  # pullback_buy | breakout_buy | rally_sell | breakdown_sell | "" (none)
+    setup: str                  # best-matching setup: pullback_buy | breakout_buy | rally_sell | breakdown_sell
+    setup_match: float          # how fully formed it is, 0-1 (1 = every condition of the strict rule is met)
+    setup_hard: bool            # True when the strict rule fired
+    setup_gaps: list            # what the setup is still missing (empty when fully formed)
     p_info: Optional[dict]      # layered probability the trade hits its target before its stop
     news_analysis: Optional[dict]  # LLM reading of the headlines in the context of the setup
     sentiment_score: float      # news_analysis["sentiment"] (0 if none)
@@ -129,10 +133,9 @@ class TickerAgent:
         logging.info(f"  [node] fetching news for {state['ticker']}")
         try:
             state["news"] = await asyncio.wait_for(
-                asyncio.to_thread(newsfeed.fetch_news, 
-                state["ticker"], 
-                self.newsLimit),
+                asyncio.to_thread(newsfeed.fetch_news, state["ticker"], self.newsLimit),
                 timeout=cfg.runtime.news_fetch_timeout_sec
+
             )
         except asyncio.TimeoutError:
             logging.error(f"   news fetch timed out after {cfg.runtime.news_fetch_timeout_sec}s for {state['ticker']}")
@@ -160,6 +163,7 @@ class TickerAgent:
         ticker = state["ticker"]
         state["benchmark"] = features.benchmark_for(ticker)
         state["setup"], state["indicators"], state["price_data"] = "", {}, None
+        state["setup_match"], state["setup_hard"], state["setup_gaps"] = 0.0, False, []
         prices, vix, bench, earnings = await asyncio.gather(
             asyncio.to_thread(features.fetch_history, ticker, features.LIVE_PERIOD),
             asyncio.to_thread(features.fetch_vix, features.LIVE_PERIOD),
@@ -171,13 +175,16 @@ class TickerAgent:
         prices = features.drop_incomplete_last_bar(prices)
         table = setups.build_setup_table(prices, vix, bench, earnings)
         if table.empty:
-            logging.warn(f"   no usable data for {ticker} (price/VIX/{state['benchmark']} missing or too short)")
+            print(f"   ⚠️  no usable data for {ticker} (price/VIX/{state['benchmark']} missing or too short)")
             return state
 
         latest = table.iloc[-1]
         state["price_data"] = prices
-        state["as_o"] = table.index[-1].date().isoformat()
-        state["setup"] = str(latest["setup"])
+        state["as_of"] = table.index[-1].date().isoformat()
+        state["setup"] = str(latest["setup"])            # always one of the four: the best match
+        state["setup_match"] = float(latest["match"])
+        state["setup_hard"] = bool(latest["hard"] == 1)
+        state["setup_gaps"] = setups.describe_gaps(latest, state["setup"])
         state["indicators"] = {c: float(latest[c]) for c in setups.SETUP_FEATURES}  # days_to_earn may be NaN
         state["indicators"]["Close"] = float(latest["Close"])
         return state
@@ -188,9 +195,9 @@ class TickerAgent:
         bundle = train.get_bundle()
         if not state.get("setup") or bundle is None:
             return state
-        state["p_info"] = setup_model.predict_final(bundle, state["indicators"], state["setup"])
+        state["p_info"] = setup_model.predict_final(bundle, state["indicators"], state["setup"], state["setup_hard"])
         p = state["p_info"]
-        logging.info(f"   [{state['ticker']}] {state['setup']}: p(any day)={p['p_any']:.2f}  p(setup)={p['p_setup']:.2f}-> p(final)={p['p_final']:.2f}  (setup trust {p['setup_trust']:.2f}, model trust {p['model_trust']:.2f}, validated={p['validated']})")
+        logging.info(f"   [{state['ticker']}] {state['setup']} match {state['setup_match']:.2f} ({p['bucket']}): p(any day)={p['p_any']:.2f}  p(this kind of day)={p['p_group']:.2f}  -> p(final)={p['p_final']:.2f} (evidence {p['setup_trust']:.2f}, model {p['model_trust']:.2f}, validated={p['validated']})")
         return state
 
     _SETUP_BRIEF = {
@@ -205,15 +212,17 @@ class TickerAgent:
     }
 
     async def _news_analysis(self, state: AgentState) -> AgentState:
-        """Read the headlines in the context of the active setup. Skipped (no LLM call) when there is no
-        setup or no headlines."""
+        """Read the headlines in the context of the best-matching setup, however fully formed it is.
+        Skipped (no LLM call) only when there are no headlines to read, or no data at all."""
         state["news_analysis"], state["sentiment_score"] = None, 0.0
-        if not state.get("setup"):
+        if not state.get("setup") or not state.get("headlines"):
             return state
         logging.info(f"   [node] reading news for {state['ticker']} in the context of {state['setup']}...")
-        prompt = """
-        You are assisting a swing trader looking at {state['ticker']}.
-Active setup: {self._SETUP_BRIEF[state['setup']]}
+        formed = ("fully formed" if state.get("setup_hard") else
+                  f"{int(state.get('setup_match', 0) * 100)}% of the way there; still missing: " + ("; ".join(state.get("setup_gaps") or ["nothing specific"])))
+        prompt = f"""You are assisting a swing trader looking at {state['ticker']}.
+Closest setup: {self._SETUP_BRIEF[state['setup']]}
+Chart status: the pattern is {formed}.
 
 Headlines: {' | '.join(state['headlines'])}
 
@@ -221,13 +230,10 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
 {{"sentiment": <number from -1 (very negative for the stock) to 1 (very positive)>,
  "thesis": "improved" | "intact" | "damaged" | "unclear"   (effect of this news on the company's business outlook),
  "materiality": <number 0 to 1: how much this could lastingly change the outlook; 0 = noise>,
- "reason": "<one short sentence>"}}
-        """
-
+ "reason": "<one short sentence>"}}"""
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
         state["news_analysis"] = self._parse_news(self._response_text(response))
         state["sentiment_score"] = state["news_analysis"]["sentiment"]
-        
         return state
 
     @staticmethod
@@ -266,9 +272,9 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
         return " ".join(parts).strip()
 
     async def _generate_signal(self, state: AgentState) -> AgentState:
-        """BUY / SELL only when a setup is active, it has out-of-sample support, and the expected value
-        after costs clears the bar (agent/decision.py). Otherwise HOLD -- with the setup, its plan and
-        the reason shown if one is active."""
+        """BUY / SELL only when the evidence for this kind of day (setup + how fully formed) holds out of
+        sample and the expected value after costs clears the bar (agent/decision.py). Otherwise HOLD, with
+        the setup, how formed it is, and the reason."""
         ind = state.get("indicators") or {}
         if not ind:  # data outage / too little history: say so, rather than "no setup"
             state["signal"], state["signal_confidence"], state["signal_score"] = "HOLD", 0.0, 0.0
@@ -279,10 +285,13 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
             p_info=state.get("p_info"),
             atr_pct=ind.get("atr_pct"),
             last_close=ind.get("Close"),
-            as_of=state.get("as_o"),
+            as_of=state.get("as_of"),
             news=state.get("news_analysis"),
             params=decision.load_params(),
             days_to_earn=ind.get("days_to_earn"),
+            match=state.get("setup_match", 1.0),
+            hard=state.get("setup_hard", True),
+            gaps=state.get("setup_gaps"),
         )
         state["signal"] = out["signal"]
         state["signal_confidence"] = out["confidence"]

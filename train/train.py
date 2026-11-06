@@ -35,7 +35,7 @@ def _strategy_signature() -> dict:
     return {
         "tp_atr": setups.TP_ATR, "sl_atr": setups.SL_ATR, "max_hold": setups.MAX_HOLD, "cost_pct": setups.COST_PCT,
         "pullback_min_atr": setups.PULLBACK_MIN_ATR, "breakout_lookback": setups.BREAKOUT_LOOKBACK,
-        "breakout_min_rel_volume": setups.BREAKOUT_MIN_REL_VOLUME, "ema_touch_atr": setups.EMA_TOUCH_ATR,
+        "breakout_min_rel_volume": setups.BREAKOUT_MIN_REL_VOLUME, "ema_touch_atr": setups.EMA_TOUCH_ATR, "close_match": setup_model.CLOSE_MATCH, "partial_match": setup_model.PARTIAL_MATCH,
     }
 
 

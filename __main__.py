@@ -78,11 +78,23 @@ def print_result(ticker: str, result: dict) -> None:
         else:
             logging.info(f"   Setup    : none active -> HOLD")
         return
+    
+    match, hard = result.get("setup_match", 0.0), result.get("setup_hard", False)
+    bucket = d.get("bucket", "hard" if hard else "weak")
+
     if setup in ("breakout_buy", "breakdown_sell"):
-        what = (f"closed {ind.get('bo_atr', float('nan')):.1f} ATR through the 20-day {'high' if setup == 'breakout_buy' else 'low'} on {ind.get('rel_volume', float('nan')):.1f}x volume")
+        what = (f"{ind.get('bo_atr', float('nan')):+.1f} ATR through the 20-day {'high' if setup == 'breakout_buy' else 'low'}, "
+                f"{ind.get('rel_volume', float('nan')):.1f}x volume")
     else:
-        what = (f"{'dip' if setup == 'pullback_buy' else 'rally'} of {ind.get('depth_atr', float('nan')):.1f} ATR from the 10-day {'high' if setup == 'pullback_buy' else 'low'}, reversal candle today")
-    logging.info(f"   Setup    : {setup.upper()}  ({what}; ATR {ind.get('atr_pct', float('nan')):.2f}% of price)")
+        what = (f"{'dip' if setup == 'pullback_buy' else 'rally'} of {ind.get('depth_atr', float('nan')):.1f} ATR from the 10-day "
+                f"{'high' if setup == 'pullback_buy' else 'low'}")
+
+    if hard:
+        logging.info(f"   Setup    : {setup.upper()} -- FULLY FORMED ({what}; ATR {ind.get('atr_pct', float('nan')):.2f}% of price)")
+    else:
+        logging.info(f"   Setup    : closest is {setup.upper()}, {int(match * 100)}% matched [{bucket.upper()}] ({what}; ATR {ind.get('atr_pct', float('nan')):.2f}% of price)")
+        for g in result.get("setup_gaps") or []:
+           logging.info(f"              - missing: {g}")
 
     news = d.get("news") or result.get("news_analysis")
     if news:
@@ -92,8 +104,7 @@ def print_result(ticker: str, result: dict) -> None:
         logging.info(f"   Value    : EV {d['ev_R']:+.2f}R per trade after {d['cost_R']:.2f}R costs ({'validated' if d['validated'] else 'NOT validated out-of-sample'})")
 
     plan = d.get("plan")
-
-    if plan:
+    if plan and (d.get("watch") or result["signal"] != "HOLD"):   # a plan for a weak match would be noise
         verb = "Buy" if d.get("direction", 1) > 0 else "Sell/short"
         logging.info(f"   Plan     : {verb} near {plan['entry_ref']:.2f} | stop {plan['stop']:.2f} ({plan['stop_pct']:.1f}%) | target {plan['target']:.2f} ({plan['target_pct']:.1f}%) | exit by {plan['max_hold_date']}")
     if result["signal"] == "HOLD":

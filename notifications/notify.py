@@ -9,7 +9,7 @@ def notify(msg, **kw):
     try:
         _unsafe_notify(msg, **kw)
     except requests.RequestException as e:
-        print(f"Notification failed: {e}")
+        logging.info(f"Notification failed: {e}")
 
 def _unsafe_notify(message, title="Python app", priority="default"):
     url = urljoin(cfg.general.notification_host, cfg.general.notification_topic)

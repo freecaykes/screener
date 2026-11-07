@@ -22,6 +22,7 @@ from datetime import datetime, time as dtime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 import logging
+from notifications import notify
 
 import warnings
 
@@ -64,8 +65,7 @@ def seconds_until_next_scan(now: Optional[datetime] = None) -> float:
 def print_result(ticker: str, result: dict) -> None:
     ind = result.get("indicators") or {}
     d = result.get("signal_detail") or {}
-    logging.info(f"{ticker} @ {time.strftime('%H:%M:%S')} (last completed session: {result.get('as_of', 'n/a')}),"
-          "vs {result.get('benchmark', 'benchmark')})")
+    logging.info(f"{ticker} @ {time.strftime('%H:%M:%S')} (last completed session: {result.get('as_of', 'n/a')}), vs {result.get('benchmark', 'benchmark')})")
     logging.info(f"   Headline : {' | '.join(result.get('headlines') or ['(none)'])[:100]}")
     dte = ind.get("days_to_earn")
     if dte is not None and math.isfinite(dte):
@@ -100,13 +100,14 @@ def print_result(ticker: str, result: dict) -> None:
     if news:
         logging.info(f"   News     : sentiment {news['sentiment']:+.2f}, thesis '{news['thesis']}', materiality {news['materiality']:.2f} -- {news.get('reason', '')}")
     if "p_final" in d:
-        logging.info(f"   Odds     : any-day {d['p_any']:.0%} -> this setup {d['p_setup']:.0%} -> final {d['p_final']:.0%} (setup evidence {d['setup_trust']:.2f}, model {d['model_trust']:.2f}, news weight {d['gamma']:.2f} [{d['gamma_source']}])")
+        logging.info(f"   Odds     : any-day {d['p_any']:.0%} -> this setup -> final {d['p_final']:.0%} (setup evidence {d['setup_trust']:.2f}, model {d['model_trust']:.2f}, news weight {d['gamma']:.2f} [{d['gamma_source']}])")
         logging.info(f"   Value    : EV {d['ev_R']:+.2f}R per trade after {d['cost_R']:.2f}R costs ({'validated' if d['validated'] else 'NOT validated out-of-sample'})")
 
     plan = d.get("plan")
     if plan and (d.get("watch") or result["signal"] != "HOLD"):   # a plan for a weak match would be noise
         verb = "Buy" if d.get("direction", 1) > 0 else "Sell/short"
         logging.info(f"   Plan     : {verb} near {plan['entry_ref']:.2f} | stop {plan['stop']:.2f} ({plan['stop_pct']:.1f}%) | target {plan['target']:.2f} ({plan['target_pct']:.1f}%) | exit by {plan['max_hold_date']}")
+   
     if result["signal"] == "HOLD":
         tag = "WATCH" if d.get("watch") else "HOLD"
         logging.info(f"   Signal   : **HOLD** [{tag}] {d.get('reason', '')}")
@@ -121,6 +122,11 @@ async def consumer(id: int, ticker_agent: TickerAgent):
             logging.info(f"Worker {id} started processing {ticker}")
             result = await ticker_agent.run(ticker)
             print_result(ticker, result)
+            signal =  result["signal"]
+            if not "HOLD" in signal:
+                signal_details = result.get("signal_detail")
+                notify(f"[{ticker}] - {signal}", f"Signal: **{result['signal']}** (P(target before stop) {result['signal_confidence']:.0%})\n Headline : {' | '.join(result.get('headlines') or ['(none)'])}")
+
         except Exception as e:
             logging.info(f"Error processing {ticker}: {e}")
         finally:
@@ -197,8 +203,7 @@ async def main():
     await asyncio.to_thread(train.xgboost, cfg.general.tickers)
     # Learn the news weight from past logged calls whose stop/target outcomes have since played out.
     params = await asyncio.to_thread(decision.refit_news)
-    logging.info(f"news weight: {params['news_gamma']:.3f} log-odds per +1.0 "
-          "({params['source']}, n={params['n']}, sd={params['news_gamma_sd']:.3f})")
+    logging.info(f"news weight: {params['news_gamma']:.3f} log-odds per +1.0 ({params['source']}, n={params['n']}, sd={params['news_gamma_sd']:.3f})")
     ticker_agent = TickerAgent(cfg.llm.model, cfg.llm.temperature)
 
     consumers = [

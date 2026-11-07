@@ -172,7 +172,7 @@ def decide(
 
     if ev >= MIN_EV_R and validated:
         strong = ev >= STRONG_EV_R
-        label = ("STRONG " if strong else "") + ("BUY" if d > 0 else "SELL")
+        label = ("STRONG_" if strong else "") + ("BUY" if d > 0 else "SELL")
         return {"signal": label, "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 
     form = "fully formed" if hard else f"{int(match * 100)}% formed ({bucket})"

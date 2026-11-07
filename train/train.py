@@ -76,8 +76,7 @@ def xgboost(tickers: list[str], force_retrain: bool = False) -> Optional[dict]:
     logging.info(f"Building swing-setup dataset from your tickers (market-relative features, shared with live inference)...")
     D, A = setup_model.build_dataset(tickers, TRAIN_PERIOD)
     baselines = setup_model.baselines_from(A)
-    logging.info(f"   {len(D)} labelled setups across {D['ticker'].nunique()} ticker(s), "
-          "{D['date'].min().date()} → {D['date'].max().date()}")
+    logging.info(f"   {len(D)} labelled setups across {D['ticker'].nunique()} ticker(s), {D['date'].min().date()} → {D['date'].max().date()}")
 
     metrics = setup_model.walk_forward_validate(D)
     rules = setup_model.rule_validation(D, A)

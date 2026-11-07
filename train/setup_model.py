@@ -319,21 +319,19 @@ def walk_forward_validate(D: pd.DataFrame, n_folds: int = 8, first_test_frac: fl
 
 def print_validation(m: dict, rules: dict, baselines: dict) -> None:
     rr = setups.TP_ATR / setups.SL_ATR
-    logging.info(f"\n📊 Evidence 1 -- does each setup, at each level of match, beat entering on a random day? "
-          f"(month-clustered, net of {setups.COST_PCT}% costs)")
-    logging.info(f"   barriers: target {setups.TP_ATR:g} ATR / stop {setups.SL_ATR:g} ATR / {setups.MAX_HOLD} bars "
-          f"(break-even win rate {1/(1+rr):.0%} before costs); any-day win rate: long {baselines['long']:.1%}, short {baselines['short']:.1%}")
-    logging.info(f"   only 'hard' (all conditions met) and 'close' (match >= {CLOSE_MATCH}) can be validated this way; "
-          f"gate: n >= {MIN_RULE_N}, months >= {MIN_RULE_MONTHS}, lift >= {MIN_LIFT_R}R, t >= {RULE_MIN_T}, net R > 0")
+    logging.info(f"\n Evidence 1 -- does each setup, at each level of match, beat entering on a random day? (month-clustered, net of {setups.COST_PCT}% costs)")
+    logging.info(f"   barriers: target {setups.TP_ATR:g} ATR / stop {setups.SL_ATR:g} ATR / {setups.MAX_HOLD} bars (break-even win rate {1/(1+rr):.0%} before costs); any-day win rate: long {baselines['long']:.1%}, short {baselines['short']:.1%}")
+    logging.info(f"   only 'hard' (all conditions met) and 'close' (match >= {CLOSE_MATCH}) can be validated this way; gate: n >= {MIN_RULE_N}, months >= {MIN_RULE_MONTHS}, lift >= {MIN_LIFT_R}R, t >= {RULE_MIN_T}, net R > 0")
     logging.info(f"   {'group':<24} {'n':>5} {'win%':>6} {'anyday':>7} {'netR':>6} {'anyR':>6} {'liftR':>6} {'t':>5}  trusted")
+    
     f = lambda x, fmt: (fmt % x) if np.isfinite(x) else "  n/a"
     for key, v in rules.items():
         if v["n"] == 0:
             continue
         flag = "YES" if v["trusted"] else ("no" if v["testable"] else "(not testable)")
-        logging.info(f"   {key:<24} {v['n']:>5} {f(v['win_rate']*100,'%5.1f'):>6} {f(v['any_win_rate']*100,'%6.1f'):>7} "
-              f"{f(v['net_R'],'%+5.2f'):>6} {f(v['any_net_R'],'%+5.2f'):>6} {f(v['lift_R'],'%+5.2f'):>6} {f(v['t_lift'],'%4.1f'):>5}  {flag}")
-    logging.info(f"\n📊 Evidence 2 -- can the model pick better days WITHIN a setup? (walk-forward by date, purged)")
+        logging.info(f"   {key:<24} {v['n']:>5} {f(v['win_rate']*100,'%5.1f'):>6} {f(v['any_win_rate']*100,'%6.1f'):>7} {f(v['net_R'],'%+5.2f'):>6} {f(v['any_net_R'],'%+5.2f'):>6} {f(v['lift_R'],'%+5.2f'):>6} {f(v['t_lift'],'%4.1f'):>5}  {flag}")
+    
+    logging.info(f"\n Evidence 2 -- can the model pick better days WITHIN a setup? (walk-forward by date, purged)")
     logging.info(f"   labelled days: {m['n_rows']}   scorable folds: {m['n_folds']} (need {MIN_FOLDS})   gate: mean IC >= {MIN_IC_EDGE}, t >= {MIN_T_STAT}")
     logging.info(f"   IC (prediction vs realised R, within setup) by fold: {m['ic_by_fold']}")
     logging.info(f"   mean IC {m['ic_mean']:+.3f}  t {m['t_stat']:.2f}  (win-rate AUC {m['auc_mean']:.3f}, Brier skill {m['brier_skill_mean']:+.3f}, "

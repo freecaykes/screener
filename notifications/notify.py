@@ -1,17 +1,18 @@
+from urllib.parse import urljoin
 import requests
+import logging
 
 from config import get_config
-import urllib.parse
 
 cfg = get_config()
 
-def notify(msg, **kw):
+def notify(title: str, msg: str, **kw):
     try:
-        _unsafe_notify(msg, **kw)
+        _unsafe_notify(msg, title, **kw)
     except requests.RequestException as e:
-        logging.info(f"Notification failed: {e}")
+        logging.error(f"Notification failed: {e}")
 
-def _unsafe_notify(message, title="Python app", priority="default"):
+def _unsafe_notify(message, title="", priority="default"):
     url = urljoin(cfg.general.notification_host, cfg.general.notification_topic)
     requests.post(
         url,

@@ -31,14 +31,6 @@ from config import get_config
 cfg = get_config()
 
 
-class Signal(Enum):
-    STRONG_SELL = 0,
-    SELL = 1,
-    HOLD = 2,
-    BUY = 3,
-    STRONG_BUY = 4
-
-
 class AgentState(TypedDict):
     ticker: str
     news: list[dict]
@@ -280,6 +272,7 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
             state["signal"], state["signal_confidence"], state["signal_score"] = "HOLD", 0.0, 0.0
             state["signal_detail"] = {"reason": "no usable data (prices, VIX or benchmark missing or too short)"}
             return state
+
         out = decision.decide(
             setup=state.get("setup", ""),
             p_info=state.get("p_info"),
@@ -293,6 +286,7 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
             hard=state.get("setup_hard", True),
             gaps=state.get("setup_gaps"),
         )
+        
         state["signal"] = out["signal"]
         state["signal_confidence"] = out["confidence"]
         state["signal_score"] = out["score"]

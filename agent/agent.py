@@ -33,8 +33,10 @@ cfg = get_config()
 
 class AgentState(TypedDict):
     ticker: str
+    trigger: str                 # "news" (headline changed) or "scan" (daily technical scan)
     news: list[dict]
     headlines: list[str]
+    headline_relevance: dict    # early LLM gate: {"relevant": bool, "reason": str}
     price_data: Optional[pd.DataFrame]
     indicators: dict            # setup features of the last COMPLETED session (+ Close)
     as_of: str                  # that session's date
@@ -93,6 +95,8 @@ class TickerAgent:
 
         workflow.add_node("fetch_news", self._fetch_news)
         workflow.add_node("extract_headline", self._extract_headline)
+        workflow.add_node("check_headline_relevance", self._check_headline_relevance)
+        workflow.add_node("skip_irrelevant", self._skip_irrelevant)
         workflow.add_node("compute_indicators", self._compute_indicators)
         workflow.add_node("setup_probability", self._setup_probability)
         workflow.add_node("news_analysis", self._news_analysis)
@@ -100,19 +104,25 @@ class TickerAgent:
 
         workflow.add_edge(START, "fetch_news")
         workflow.add_edge("fetch_news", "extract_headline")
-        workflow.add_edge("extract_headline", "compute_indicators")
+        workflow.add_edge("extract_headline", "check_headline_relevance")
+        workflow.add_conditional_edges(
+            "check_headline_relevance",
+            self._route_after_headline_relevance,
+            {"relevant": "compute_indicators", "irrelevant": "skip_irrelevant"},
+        )
         workflow.add_edge("compute_indicators", "setup_probability")
         workflow.add_edge("setup_probability", "news_analysis")
         workflow.add_edge("news_analysis", "generate_signal")
         workflow.add_edge("generate_signal", END)
+        workflow.add_edge("skip_irrelevant", END)
 
         self.workflow = workflow
         self.app = self.workflow.compile()
         logging.debug(f"TickerAgent workflow compiled.")
 
-    async def run(self, ticker: str) -> AgentState:
-        logging.info(f"Running agent for {ticker}...")
-        initial_state: AgentState = {"ticker": ticker}
+    async def run(self, ticker: str, trigger: str = "news") -> AgentState:
+        logging.info(f"Running agent for {ticker} ({trigger})...")
+        initial_state: AgentState = {"ticker": ticker, "trigger": trigger}
         try:
             result = await self.app.ainvoke(initial_state)
             logging.info(f"🏁 Finished agent for {ticker}.")
@@ -147,6 +157,89 @@ class TickerAgent:
             text = n["summary"] or n["title"]
             if text:
                 state["headlines"].append(text)
+        return state
+
+    async def _check_headline_relevance(self, state: AgentState) -> AgentState:
+        """Early LLM gate: stop before the expensive analysis when the news cannot move this ticker.
+
+        Daily technical scans are never gated: they must still run when the latest headline is
+        unrelated (or there is no news at all).
+        """
+        state["headline_relevance"] = {"relevant": True, "reason": ""}
+        if state.get("trigger") == "scan":
+            return state
+
+        headlines = state.get("headlines") or []
+        if not headlines:
+            return state
+
+        logging.info(
+            f"   [node] checking whether the headline is price-relevant for {state['ticker']}..."
+        )
+        headline_text = "\n".join(f"- {h}" for h in headlines)
+        prompt = f"""You are screening news for a swing-trading screener.
+Ticker: {state['ticker']}
+
+Headlines:
+{headline_text}
+
+State the relevancy if this news could plausibly affect {state['ticker']}'s price
+Reply with ONLY this JSON object:
+{{"relevant": <true or false>, "reason": "<one short sentence>"}}"""
+        try:
+            response = await self.llm.ainvoke([HumanMessage(content=prompt)])
+        except Exception as e:
+            logging.error(
+                f"   headline relevance check failed for {state['ticker']}: {type(e).__name__}: {e}"
+            )
+            return state  # fail open: a broken gate must not suppress the setup analysis
+
+        state["headline_relevance"] = self._parse_relevance(self._response_text(response))
+        rel = state["headline_relevance"]
+        logging.info(f"   price relevance: {rel['relevant']} -- {rel['reason']}")
+        return state
+
+    @staticmethod
+    def _parse_relevance(text: str) -> dict:
+        """Parse the model's relevance JSON; fail open (relevant=True) on malformed output."""
+        out = {"relevant": True, "reason": ""}
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            return out
+        try:
+            payload = json.loads(match.group())
+        except (ValueError, TypeError):
+            return out
+        if not isinstance(payload, dict):
+            return out
+
+        value = payload.get("relevant", True)
+        if value is None:
+            out["relevant"] = True
+        elif isinstance(value, str):
+            out["relevant"] = value.strip().lower() in ("true", "yes", "1")
+        else:
+            out["relevant"] = bool(value)
+        out["reason"] = str(payload.get("reason", ""))[:200]
+        return out
+
+    @staticmethod
+    def _route_after_headline_relevance(state: AgentState) -> str:
+        relevance = state.get("headline_relevance") or {}
+        return "irrelevant" if relevance.get("relevant") is False else "relevant"
+
+    async def _skip_irrelevant(self, state: AgentState) -> AgentState:
+        """Short-circuit an unrelated headline: report HOLD without fetching indicators or calling the LLM again."""
+        relevance = state.get("headline_relevance") or {}
+        reason = relevance.get("reason") or "news is not price-relevant"
+        logging.info(f"   [{state['ticker']}] skipping pipeline: {reason}")
+        state["signal"] = "HOLD"
+        state["signal_confidence"] = 0.0
+        state["signal_score"] = 0.0
+        state["signal_detail"] = {
+            "reason": f"headline not price-relevant for {state['ticker']}: {reason}",
+            "headline_relevance": relevance,
+        }
         return state
 
     async def _compute_indicators(self, state: AgentState) -> AgentState:

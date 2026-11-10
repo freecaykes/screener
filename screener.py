@@ -128,7 +128,7 @@ async def consumer(id: int, ticker_agent: TickerAgent):
             signal =  result["signal"]
             if not "HOLD" in signal:
                 signal_details = result.get("signal_detail")
-                notify(f"[{ticker}] - {signal}", f"Signal: **{result['signal']}** (P(target before stop) {result['signal_confidence']:.0%})\n Headline : {' | '.join(result.get('headlines') or ['(none)'])}")
+                notify(f"[{ticker}] - {signal}", f"Signal: **{result['signal']}** (P(target before stop) {result['signal_confidence']:.0%})\n Headline : {' | '.join(result.get('headlines') or ['(none)'])}", priority="max")
 
         except Exception as e:
             logging.info(f"Error processing {ticker}: {e}")

@@ -2,7 +2,7 @@
 # Secrets (the API key) do NOT go here: put them in .env and name the variable below.
 
 [general]
-tickers = ["CELH", "SOFI", "GOOG", "META"]
+tickers = ["CELH", "SOFI", "GOOG", "META", "NVDA","UBER","AVGO","NBIS"]
 logging_level = "INFO"
 notification_host="https://ntfy.sh"
 notification_topic="screener-alerts-xk7k2q9"

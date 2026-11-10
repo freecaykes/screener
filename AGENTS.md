@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Swing-setup screener: a long-running asyncio service that scans Yahoo Finance after the US close (16:10 ET) and on a polling loop, detects one of four setups, estimates target-before-stop odds with a cached XGBoost bundle, then asks an LLM to read the news in context. There is no README and no test suite; module docstrings are the design notes.
+Swing-setup screener: a long-running asyncio service that scans Yahoo Finance after the US close (16:10 ET) and polls for new headlines, detects one of four setups, estimates target-before-stop odds with a cached XGBoost bundle, then asks an LLM to read the news in context. There is no README and no test suite; module docstrings are the design notes.
 
 ## Commands
 
@@ -14,8 +14,8 @@ Swing-setup screener: a long-running asyncio service that scans Yahoo Finance af
 
 ## Structure
 
-- `screener.py` — startup trains/loads the model and refits the news weight, then starts the news producer, daily scan, and worker consumers. `__main__.py` is a thin shim so `python __main__.py` keeps working.
-- `agent/agent.py` — LangGraph pipeline: `fetch_news -> extract_headline -> compute_indicators -> setup_probability -> news_analysis -> generate_signal`.
+- `screener.py` — startup trains/loads the model and refits the news weight, then starts the news producer (first poll fetches `runtime.news_limit` headlines, later polls fetch one; it queues a ticker only when its newest headline changes), daily scan, and worker consumers. `__main__.py` is a thin shim so `python __main__.py` keeps working.
+- `agent/agent.py` — LangGraph pipeline: `fetch_news -> extract_headline -> check_headline_relevance -> (compute_indicators -> setup_probability -> news_analysis -> generate_signal | skip_irrelevant)`. News-triggered runs are gated by an LLM price-relevance check; daily `scan` runs skip the gate so technical setups still run.
 - `train/features.py` + `train/setups.py` — the one feature/setup implementation shared by training and live inference.
 - `train/setup_model.py` — dataset building, walk-forward validation, calibration, `predict_final`.
 - `agent/decision.py` — pure `decide()`, plus the shadow log and news-weight refit. HOLD is normal: BUY/SELL requires out-of-sample validation and EV above `MIN_EV_R`.
@@ -23,7 +23,6 @@ Swing-setup screener: a long-running asyncio service that scans Yahoo Finance af
 
 ## Gotchas
 
-- Despite the header comment, `news_source` queues every ticker on every poll (default 300s), not only when a headline changes.
 - `get_config()` is `lru_cache`d and called at import time in several modules; a TOML change needs a fresh process (or `cache_clear()` in tests).
 - First run downloads ~10y per ticker and trains. Later runs reuse `setup_bundle_v1.pkl`; it is retrained when the feature list, strategy constants, ticker set, or benchmark mapping changes (`force_retrain=True` forces it).
 - Only completed daily bars are used; `features.drop_incomplete_last_bar()` removes today's partial bar before 16:05 ET, so `as_of` is intentionally the prior session.

@@ -9,9 +9,10 @@
 #        pullback_buy  : dip in an uptrend that has just shown a reversal candle (~ near a local low)
 #        breakout_buy  : close above the prior 20-day high on heavy volume
 #        rally_sell / breakdown_sell : the mirror images
-#   2. estimates the chance the trade reaches its profit target before its stop (train/setup_model.py)
-#   3. has the LLM read the headlines IN THE CONTEXT of that setup (noise vs lasting damage / real catalyst)
-#   4. prints BUY / SELL with an entry reference, stop, target and time stop -- or HOLD with the reason
+#   2. first asks the LLM whether the news can plausibly move this stock; unrelated news stops here
+#   3. estimates the chance the trade reaches its profit target before its stop (train/setup_model.py)
+#   4. has the LLM read the headlines IN THE CONTEXT of that setup (noise vs lasting damage / real catalyst)
+#   5. prints BUY / SELL with an entry reference, stop, target and time stop -- or HOLD with the reason
 #
 # Triggers: a once-a-day scan after the close, new headlines, and once at startup.
 # =============================================================================
@@ -73,8 +74,9 @@ def print_result(ticker: str, result: dict) -> None:
 
     setup = result.get("setup") or ""
     if not setup:
-        if d.get("reason", "").startswith("no usable data"):
-            logging.info(f"   Status   : HOLD -- {d['reason']}")
+        reason = d.get("reason", "")
+        if reason:
+            logging.info(f"   Status   : HOLD -- {reason}")
         else:
             logging.info(f"   Setup    : none active -> HOLD")
         return
@@ -117,10 +119,11 @@ def print_result(ticker: str, result: dict) -> None:
 
 async def consumer(id: int, ticker_agent: TickerAgent):
     while True:
-        ticker = await QUEUE.get()
+        item = await QUEUE.get()
+        ticker, trigger = item if isinstance(item, tuple) else (item, "news")
         try:
-            logging.info(f"Worker {id} started processing {ticker}")
-            result = await ticker_agent.run(ticker)
+            logging.info(f"Worker {id} started processing {ticker} ({trigger})")
+            result = await ticker_agent.run(ticker, trigger=trigger)
             print_result(ticker, result)
             signal =  result["signal"]
             if not "HOLD" in signal:
@@ -133,13 +136,13 @@ async def consumer(id: int, ticker_agent: TickerAgent):
             QUEUE.task_done()
 
 
-async def latest_headline(ticker: str) -> Optional[str]:
+async def latest_headline(ticker: str, news_limit: int) -> Optional[str]:
     """Newest headline for `ticker`, or None. Every failure path says why it returned None."""
     try:
         # NOTE: on timeout the worker thread keeps running in the background (threads
         # can't be killed), but the loop moves on instead of waiting forever.
         items = await asyncio.wait_for(
-            asyncio.to_thread(newsfeed.fetch_news, ticker, cfg.runtime.news_limit), timeout=cfg.runtime.news_fetch_timeout_sec
+            asyncio.to_thread(newsfeed.fetch_news, ticker, news_limit), timeout=cfg.runtime.news_fetch_timeout_sec
         )
     except asyncio.TimeoutError:
         logging.info(f"[{ticker}] news fetch timed out after {cfg.runtime.news_fetch_timeout_sec}s")
@@ -158,36 +161,50 @@ async def latest_headline(ticker: str) -> Optional[str]:
         keys = list(items[0]) if isinstance(items[0], dict) else type(items[0]).__name__
         logging.info(f"[{ticker}] newest news item has no title/summary; item keys: {keys}")
         return None
+
     return headline
+
+
+async def queue_new_headlines(news_limit: int) -> None:
+    """Poll each ticker and enqueue it only when its newest headline changed."""
+    for ticker in cfg.general.tickers:
+        headline = await latest_headline(ticker, news_limit)
+        if not headline:
+            logging.info(f"[{ticker}] no headline available; not queueing")
+            continue
+        if headline == LAST_HEADLINES.get(ticker):
+            logging.info(f"[{ticker}] no new headline (latest: {headline[:60]!r})")
+            continue
+
+        logging.info(
+            f"[NEW NEWS DETECTED] {ticker} → queued for processing headline: {headline[:50]} ..."
+        )
+        LAST_HEADLINES[ticker] = headline
+        await QUEUE.put((ticker, "news"))
 
 
 async def news_source():
     logging.info(f"News director started — checking every {cfg.runtime.news_poll_interval_sec}s")
+    # First pass pulls `news_limit` headlines per ticker from config; after that only the newest
+    # headline matters for change detection, so each poll fetches a single item.
+    news_limit = cfg.runtime.news_limit
 
     while True:
-        for ticker in cfg.general.tickers:
-            headline = await latest_headline(ticker)
-            if not headline:
-                logging.info(f"[{ticker}] no new headline) running on LLM-found headline")
-            elif headline == LAST_HEADLINES.get(ticker):
-                logging.info(f"[{ticker}] no new headline (latest: {headline[:60]!r}) running on LLM-found headline")
-            else:
-                logging.info(f"[NEW NEWS DETECTED] {ticker} → queued for processing headline: {headline[:50]} ...")
-                LAST_HEADLINES[ticker] = headline
-                
-            await QUEUE.put(ticker)
+        await queue_new_headlines(news_limit)
+        news_limit = 1
         await asyncio.sleep(cfg.runtime.news_poll_interval_sec)
 
 
 async def daily_scan():
     """Queue every ticker once a day just after the close, when the day's bar is complete."""
+
     while True:
         wait = seconds_until_next_scan()
         logging.info(f"next daily scan in {wait/3600:.1f}h")
         await asyncio.sleep(wait)
         for ticker in cfg.general.tickers:
             logging.info(f"[daily scan] queueing {ticker}")
-            await QUEUE.put(ticker)
+            await QUEUE.put((ticker, "scan"))
         await asyncio.sleep(60)  # don't fire twice for the same minute
 
 

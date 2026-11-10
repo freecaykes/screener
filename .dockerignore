@@ -1,0 +1,24 @@
+# Local virtualenv and tooling
+.venv
+.git
+.gitignore
+.vscode
+.idea
+.ruff_cache
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+
+# Runtime state (persisted on the /data volume instead)
+.env
+screener-cron.log
+config/*.local.toml
+setup_bundle_v1.pkl
+*.pkl
+*_log.json*
+decision_params.json
+
+# Docs / local noise
+AGENTS.md
+Dockerfile
+.dockerignore

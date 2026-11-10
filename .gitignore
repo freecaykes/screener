@@ -9,6 +9,7 @@
 /dataSources/
 /dataSources.local.xml
 decision_params.json
+screener-cron.log
 
 **/**/*.pkl
 **/**/*_log.json*

@@ -7,6 +7,8 @@ Swing-setup screener: a long-running asyncio service that scans Yahoo Finance af
 - `make run` — canonical run: creates `.venv`, `pip install -e .`, sources `.env`, then runs `python __main__.py`. Do not use it as a smoke test; it blocks forever and calls Yahoo/LLM APIs.
 - `.venv/bin/stock-agent` — installed console script (calls `screener.run`); same long-running service.
 - `make build` / `make clean` / `make rebuild` — venv lifecycle. The editable install exposes `agent`, `train`, `config`, `notifications`, `backtest`, and `screener`, so imports work from any cwd. Runtime state files are cwd-relative, so run the service from the repo root.
+- `make docker-build` / `docker-run` / `docker-up` / `docker-down` — container lifecycle. The image runs from `/data` (the `screener-data` volume, where the model cache and logs persist), loads `.env` via `--env-file`, and bind-mounts `config/config.toml` read-only at `/config/config.toml` (`SCREENER_CONFIG`). Override with `ENV_FILE=` / `CONFIG_FILE=`. `docker-shell` opens a debug shell; `docker-purge` also deletes the volume.
+- `make docker-window` — run now and stop at `STOP_AT` (default `15:00`). `make docker-cron-install` installs a weekday (Mon–Fri) `05:00` start entry that runs `scripts/docker-window.sh`; `make docker-cron-remove` removes it. Cron uses the host's local timezone. Note the app's daily post-close scan is 16:10 ET, so a window ending at 15:00 local only covers it when local time is at least ~1h10m behind ET.
 - Tests: none exist yet. `pytest` is configured for `tests/`; dev tools are not installed by `make build`:
   - `.venv/bin/pip install -e '.[dev]'`
   - `.venv/bin/python -m pytest tests/test_x.py::test_name -v`

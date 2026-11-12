@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 import logging
@@ -59,6 +60,7 @@ GAMMA_MAX = 1.5
 DEFAULT_PARAMS = {"news_gamma": GAMMA_PRIOR_MEAN, "news_gamma_sd": GAMMA_PRIOR_SD, "n": 0, "source": "prior"}
 
 _BUYS = ("pullback_buy", "breakout_buy")
+_LAST_RECORD: dict[tuple, tuple[float, str, str]] = {}
 
 
 def _sigmoid(z): return 1.0 / (1.0 + math.exp(-z))
@@ -106,10 +108,15 @@ def decide(
     match: float = 1.0,
     hard: bool = True,
     gaps: Optional[list] = None,
+    intraday: bool = False,
+    bar_complete: bool = True,
+    price_reaction: Optional[dict] = None,
 ) -> dict:
     """Return {'signal', 'confidence', 'score', 'detail'}.
 
     confidence = P(target before stop) after news; score = expected R per trade after costs.
+    When `bar_complete` is False the plan is provisional: the entry reference is the live
+    price and the evidence bar is higher than for a completed session.
     """
     params = params or DEFAULT_PARAMS
     if not setup:
@@ -118,6 +125,7 @@ def decide(
     if atr_pct is None or not np.isfinite(atr_pct) or atr_pct <= 0 or last_close is None:
         return _hold("no volatility estimate (indicators unavailable)", setup=setup)
 
+    provisional = bool(intraday or not bar_complete)
     rr = setups.TP_ATR / setups.SL_ATR
     plan = {
         "entry_ref": round(float(last_close), 4),
@@ -130,7 +138,9 @@ def decide(
     bucket = (p_info or {}).get("bucket") or ("hard" if hard else ("close" if match >= 0.9 else ("partial" if match >= 0.75 else "weak")))
     alert = bucket in ("hard", "close")   # partial / weak matches are context, not alerts
     base = {"setup": setup, "direction": int(d), "plan": plan, "rr": rr, "match": round(float(match), 3),
-            "hard": bool(hard), "bucket": bucket, "gaps": list(gaps or [])}
+            "hard": bool(hard), "bucket": bucket, "gaps": list(gaps or []),
+            "provisional": provisional, "bar_complete": bool(bar_complete),
+            "price_reaction": dict(price_reaction or {})}
 
     # Computed before any early exit so that vetoed / blocked setups are still LOGGED with their probability
     # and news reading: you can later check whether the veto and the blackout actually helped, and the
@@ -170,14 +180,21 @@ def decide(
         "validated": validated, "watch": False,
     }
 
-    if ev >= cfg.signals.min_ev_r and p >= cfg.signals.min_confidence and validated:
+    min_ev = cfg.signals.min_ev_r if bar_complete else max(
+        cfg.signals.min_ev_r, cfg.signals.provisional_min_ev_r
+    )
+    if provisional and bucket not in ("hard", "close"):
+        detail.update(reason=f"provisional setup is only {bucket}; waiting for a closer match", watch=False)
+        return {"signal": "HOLD", "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
+
+    if ev >= min_ev and p >= cfg.signals.min_confidence and validated:
         strong = ev >= cfg.signals.strong_ev_r
         label = ("STRONG_" if strong else "") + ("BUY" if d > 0 else "SELL")
         return {"signal": label, "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 
     form = "fully formed" if hard else f"{int(match * 100)}% formed ({bucket})"
     why = (f"{setup} {form}, but this kind of day is not validated out-of-sample (evidence too thin to act on)" if not validated
-           else f"expected value {ev:+.2f}R is below the {cfg.signals.min_ev_r}R bar")
+           else f"expected value {ev:+.2f}R is below the {min_ev:g}R {'provisional ' if provisional else ''}bar")
     detail.update(reason=why, watch=alert)
     return {"signal": "HOLD", "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 
@@ -208,15 +225,34 @@ def record(state: dict, out: dict, path: str = LOG_PATH) -> None:
     if "p_pre_news" not in d:
         return
     try:
+        complete = bool(d.get("bar_complete", True))
+        key = (state.get("ticker"), d.get("setup"), d.get("direction"))
+        now = time.time()
+        previous = _LAST_RECORD.get(key)
+        if not complete and previous:
+            age, last_signal, last_bucket = previous
+            if (
+                out["signal"] == last_signal
+                and d.get("bucket") == last_bucket
+                and now - age < cfg.runtime.intraday_cooldown_sec
+            ):
+                return
+        _LAST_RECORD[key] = (now, out["signal"], d.get("bucket"))
+
         news = d.get("news") or {}
         row = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "ticker": state.get("ticker"), "as_of": state.get("as_of"),
+            "as_of_ts": state.get("as_of_ts"),
+            "trigger": state.get("trigger"),
+            "bar_complete": complete,
+            "provisional": bool(d.get("provisional", not complete)),
             "setup": d["setup"], "direction": d["direction"], "atr_pct": state.get("indicators", {}).get("atr_pct"),
             "match": d.get("match"), "hard": d.get("hard"), "bucket": d.get("bucket"),
             "p_pre_news": d["p_pre_news"], "news_strength": d["news_strength"],
             "sentiment": news.get("sentiment"), "thesis": news.get("thesis"), "materiality": news.get("materiality"),
             "headline": (state.get("headlines") or [""])[0][:160],
+            "price_reaction": state.get("price_reaction") or {},
             "signal": out["signal"], "ev_R": d.get("ev_R"), "reason": d.get("reason", "")[:120],
         }
         with open(path, "a") as f:
@@ -259,6 +295,8 @@ def label_outcomes(rows: list[dict], fetch: Callable[[str], pd.DataFrame]) -> li
     last_kept: dict[tuple, int] = {}
     out: list[dict] = []
     for r in ordered:
+        if not r.get("bar_complete", True):
+            continue
         tkr = r.get("ticker")
         if tkr not in ohlc:
             try:

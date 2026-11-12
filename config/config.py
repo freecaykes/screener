@@ -72,11 +72,40 @@ class RuntimeConfig:
     news_fetch_timeout_sec: int = 30
     news_limit: int = 5
     max_concurrent: int = 5
+    intraday_enabled: bool = True
+    intraday_interval: str = "1m"
+    quote_poll_interval_sec: int = 60
+    price_trigger_atr: float = 0.35
+    price_trigger_pct: float = 0.5
+    volume_trigger_rel: float = 2.0
+    intraday_cooldown_sec: int = 300
+    volume_profile_days: int = 20
+    session_start: str = "09:35"
+    session_end: str = "15:55"
 
     def __post_init__(self) -> None:
-        for name in ("news_poll_interval_sec", "news_fetch_timeout_sec", "news_limit", "max_concurrent"):
+        for name in (
+            "news_poll_interval_sec",
+            "news_fetch_timeout_sec",
+            "news_limit",
+            "max_concurrent",
+            "quote_poll_interval_sec",
+            "intraday_cooldown_sec",
+            "volume_profile_days",
+        ):
             if getattr(self, name) < 1:
                 raise ValueError("runtime.{name} must be >= 1")
+        for name in ("price_trigger_atr", "price_trigger_pct", "volume_trigger_rel"):
+            if getattr(self, name) <= 0:
+                raise ValueError("runtime.{name} must be > 0")
+        for name in ("session_start", "session_end"):
+            value = getattr(self, name)
+            try:
+                hour, minute = (int(part) for part in value.split(":", 1))
+            except (AttributeError, ValueError):
+                raise ValueError("runtime.{name} must be HH:MM") from None
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("runtime.{name} must be HH:MM")
 
 
 @dataclass(frozen=True)
@@ -172,10 +201,17 @@ class SignalConfig:
     min_ev_r: float = 0.15                # need >= this expected R per trade after costs
     strong_ev_r: float = 0.5
     min_confidence: float = 0.28
+    provisional_min_ev_r: float = 0.20    # incomplete intraday bars need stronger evidence
     earnings_blackout_cal_days: int = 14  # ~ the hold window: don't hold through earnings (relax if you want to)
 
     def __post_init__(self) -> None:
-        for name in ("min_ev_r", "strong_ev_r", "earnings_blackout_cal_days", "min_confidence"):
+        for name in (
+            "min_ev_r",
+            "strong_ev_r",
+            "earnings_blackout_cal_days",
+            "min_confidence",
+            "provisional_min_ev_r",
+        ):
             if getattr(self, name) < 0:
                 raise ValueError("signal.{name} must be >= 0")
 

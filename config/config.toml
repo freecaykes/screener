@@ -13,6 +13,17 @@ news_limit = 5                 # headlines fetched per ticker
 news_fetch_timeout_sec = 10    # give up on a slow news fetch after this long
 max_concurrent = 5             # consumer workers analysing tickers at once
 
+intraday_enabled = true        # use live partial bars and the price-trigger loop
+intraday_interval = "1m"       # yfinance interval for live bars
+quote_poll_interval_sec = 60   # quote-cache refresh; only threshold crossings queue a ticker
+price_trigger_atr = 0.35       # queue when price moves this many daily ATRs from the last trigger
+price_trigger_pct = 0.5        # ...or at least this percent, whichever is larger
+volume_trigger_rel = 2.0       # queue when volume pace reaches this multiple of normal
+intraday_cooldown_sec = 300    # minimum gap between price-triggered runs per ticker
+volume_profile_days = 20       # prior sessions used to model the intraday volume curve
+session_start = "09:35"        # avoid the opening auction
+session_end = "15:55"          # avoid the closing auction
+
 [llm]
 # Passed to langchain's init_chat_model. Examples: google_genai, openai, anthropic, xai.
 # Leave empty ("") to let langchain infer the provider from the model name.
@@ -23,4 +34,5 @@ api_key_env = "API_KEY"        # name of the env var / .env entry holding the ke
 
 [signals]
 min_ev_r = 0.05
+provisional_min_ev_r = 0.20
 

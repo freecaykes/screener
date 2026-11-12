@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from enum import Enum
 
 import pandas as pd
@@ -33,13 +34,19 @@ cfg = get_config()
 
 class AgentState(TypedDict):
     ticker: str
-    trigger: str                 # "news" (headline changed) or "scan" (daily technical scan)
+    trigger: str                 # "news", "scan" (daily technical scan), or "price"
     news: list[dict]
     headlines: list[str]
     headline_relevance: dict    # early LLM gate: {"relevant": bool, "reason": str}
     price_data: Optional[pd.DataFrame]
     indicators: dict            # setup features of the last COMPLETED session (+ Close)
     as_of: str                  # that session's date
+    as_of_ts: str               # exact snapshot time for a provisional intraday bar
+    bar_complete: bool          # False while the current session is still trading
+    price_reaction: dict        # live price/volume reaction snapshot
+    risk_atr_pct: float         # ATR from completed daily bars, used for stops/targets
+    provisional_signal: str
+    provisional_detail: dict
     benchmark: str              # reference for the relative-strength features (e.g. SPY)
     setup: str                  # best-matching setup: pullback_buy | breakout_buy | rally_sell | breakdown_sell
     setup_match: float          # how fully formed it is, 0-1 (1 = every condition of the strict rule is met)
@@ -71,6 +78,8 @@ class TickerAgent:
         provider = os.getenv("LLM_PROVIDER")
         logging.info(f"   Provider: {provider}")
         self.newsLimit = newsLimit
+        self._news_items: dict[str, list] = {}
+        self._news_analysis_cache: dict[str, tuple[str, dict, float]] = {}
 
         # Determine the correct API key parameter based on provider
         kwargs = {
@@ -99,6 +108,7 @@ class TickerAgent:
         workflow.add_node("skip_irrelevant", self._skip_irrelevant)
         workflow.add_node("compute_indicators", self._compute_indicators)
         workflow.add_node("setup_probability", self._setup_probability)
+        workflow.add_node("provisional_signal", self._provisional_signal)
         workflow.add_node("news_analysis", self._news_analysis)
         workflow.add_node("generate_signal", self._generate_signal)
 
@@ -111,7 +121,8 @@ class TickerAgent:
             {"relevant": "compute_indicators", "irrelevant": "skip_irrelevant"},
         )
         workflow.add_edge("compute_indicators", "setup_probability")
-        workflow.add_edge("setup_probability", "news_analysis")
+        workflow.add_edge("setup_probability", "provisional_signal")
+        workflow.add_edge("provisional_signal", "news_analysis")
         workflow.add_edge("news_analysis", "generate_signal")
         workflow.add_edge("generate_signal", END)
         workflow.add_edge("skip_irrelevant", END)
@@ -132,21 +143,26 @@ class TickerAgent:
             raise
 
     async def _fetch_news(self, state: AgentState) -> AgentState:
-        logging.info(f"  [node] fetching news for {state['ticker']}")
+        ticker = state["ticker"]
+        if state.get("trigger") == "price" and ticker in self._news_items:
+            state["news"] = self._news_items[ticker]
+            return state
+        logging.info(f"  [node] fetching news for {ticker}")
         try:
             state["news"] = await asyncio.wait_for(
-                asyncio.to_thread(newsfeed.fetch_news, state["ticker"], self.newsLimit),
+                asyncio.to_thread(newsfeed.fetch_news, ticker, self.newsLimit),
                 timeout=cfg.runtime.news_fetch_timeout_sec
 
             )
         except asyncio.TimeoutError:
-            logging.error(f"   news fetch timed out after {cfg.runtime.news_fetch_timeout_sec}s for {state['ticker']}")
+            logging.error(f"   news fetch timed out after {cfg.runtime.news_fetch_timeout_sec}s for {ticker}")
             state["news"] = []
         except Exception as e:  # keep the pipeline alive: no news just means sentiment = 0
-            logging.error(f"   news fetch failed for {state['ticker']}: {type(e).__name__}: {e}")
+            logging.error(f"   news fetch failed for {ticker}: {type(e).__name__}: {e}")
             state["news"] = []
+        self._news_items[ticker] = state["news"]
         if not state["news"]:
-            logging.warn(f"   no news items for {state['ticker']}")
+            logging.warning(f"   no news items for {ticker}")
         return state
 
     async def _extract_headline(self, state: AgentState) -> AgentState:
@@ -166,7 +182,7 @@ class TickerAgent:
         unrelated (or there is no news at all).
         """
         state["headline_relevance"] = {"relevant": True, "reason": ""}
-        if state.get("trigger") == "scan":
+        if state.get("trigger") in ("scan", "price"):
             return state
 
         headlines = state.get("headlines") or []
@@ -248,32 +264,116 @@ Reply with ONLY this JSON object:
         # Uses train/setups.py + train/features.py -- the exact code the model was trained with.
         # Blocking yfinance calls run in threads so they don't stall the event loop.
         ticker = state["ticker"]
-        state["benchmark"] = features.benchmark_for(ticker)
+        trigger = state.get("trigger", "news")
+        benchmark = features.benchmark_for(ticker)
+        session = features.market_session(
+            start=cfg.runtime.session_start, end=cfg.runtime.session_end
+        )
+        use_live = bool(cfg.runtime.intraday_enabled and trigger != "scan" and session["is_open"])
+
+        state["benchmark"] = benchmark
         state["setup"], state["indicators"], state["price_data"] = "", {}, None
         state["setup_match"], state["setup_hard"], state["setup_gaps"] = 0.0, False, []
-        prices, vix, bench, earnings = await asyncio.gather(
-            asyncio.to_thread(features.fetch_history, ticker, features.LIVE_PERIOD),
-            asyncio.to_thread(features.fetch_vix, features.LIVE_PERIOD),
-            asyncio.to_thread(features.fetch_bench, ticker, features.LIVE_PERIOD),
-            asyncio.to_thread(features.fetch_earnings_dates, ticker),
-        )
-        # Training only saw completed sessions; use the last finished one (a half-formed bar would
-        # have partial volume and a "close" that is just the last price).
-        prices = features.drop_incomplete_last_bar(prices)
-        table = setups.build_setup_table(prices, vix, bench, earnings)
+        state["provisional_signal"], state["provisional_detail"] = "", {}
+        state["price_reaction"] = {}
+        state["bar_complete"] = not use_live
+        state["as_of_ts"] = session["now"]
+
+        if use_live:
+            (prices, reaction), vix, bench, earnings = await asyncio.gather(
+                asyncio.to_thread(
+                    features.fetch_live_prices,
+                    ticker,
+                    cfg.runtime.intraday_interval,
+                    cfg.runtime.volume_profile_days,
+                    None,
+                    False,
+                    cfg.runtime.session_start,
+                    cfg.runtime.session_end,
+                ),
+                asyncio.to_thread(features.fetch_vix_live),
+                asyncio.to_thread(features.fetch_bench_live, ticker),
+                asyncio.to_thread(features.fetch_earnings_dates_cached, ticker),
+            )
+            if not reaction.get("live"):
+                # No intraday snapshot: fall back to the last completed daily bar rather than
+                # feeding a partial daily bar into the model.
+                use_live = False
+                state["bar_complete"] = True
+                prices = features.drop_incomplete_last_bar(prices)
+                table = await asyncio.to_thread(
+                    setups.build_setup_table, prices, vix, bench, earnings
+                )
+            else:
+                state["price_reaction"] = reaction
+                state["bar_complete"] = False
+                state["as_of_ts"] = reaction.get("as_of_ts", session["now"])
+                table = await asyncio.to_thread(
+                    setups.build_live_setup_table, prices, vix, bench, earnings
+                )
+        else:
+            force = trigger == "scan"
+            prices, vix_df, bench_df, earnings = await asyncio.gather(
+                asyncio.to_thread(
+                    features.fetch_history_cached,
+                    ticker,
+                    features.LIVE_PERIOD,
+                    None,
+                    900,
+                    force,
+                ),
+                asyncio.to_thread(
+                    features.fetch_history_cached,
+                    "^VIX",
+                    features.LIVE_PERIOD,
+                    None,
+                    900,
+                    force,
+                ),
+                asyncio.to_thread(
+                    features.fetch_history_cached,
+                    benchmark,
+                    features.LIVE_PERIOD,
+                    None,
+                    900,
+                    force,
+                ),
+                asyncio.to_thread(features.fetch_earnings_dates_cached, ticker),
+            )
+            vix = vix_df["Close"] if not vix_df.empty else pd.Series(dtype=float)
+            bench = bench_df["Close"] if not bench_df.empty else pd.Series(dtype=float)
+            prices = features.drop_incomplete_last_bar(prices)
+            table = await asyncio.to_thread(
+                setups.build_setup_table, prices, vix, bench, earnings
+            )
+
         if table.empty:
-            print(f"   ⚠️  no usable data for {ticker} (price/VIX/{state['benchmark']} missing or too short)")
+            logging.warning(
+                f"   no usable data for {ticker} (price/VIX/{benchmark} missing or too short)"
+            )
             return state
 
         latest = table.iloc[-1]
         state["price_data"] = prices
         state["as_of"] = table.index[-1].date().isoformat()
+        if not use_live:
+            state["as_of_ts"] = state["as_of"]
         state["setup"] = str(latest["setup"])            # always one of the four: the best match
         state["setup_match"] = float(latest["match"])
         state["setup_hard"] = bool(latest["hard"] == 1)
         state["setup_gaps"] = setups.describe_gaps(latest, state["setup"])
         state["indicators"] = {c: float(latest[c]) for c in setups.SETUP_FEATURES}  # days_to_earn may be NaN
         state["indicators"]["Close"] = float(latest["Close"])
+
+        completed = prices.iloc[:-1] if use_live else prices
+        risk_atr = float(latest["atr_pct"])
+        if len(completed) > 20:
+            completed_atr = setups.atr(completed)
+            last_atr = completed_atr.iloc[-1]
+            last_close = completed["Close"].iloc[-1]
+            if pd.notna(last_atr) and last_close > 0:
+                risk_atr = float(last_atr / last_close * 100.0)
+        state["risk_atr_pct"] = risk_atr
         return state
 
     async def _setup_probability(self, state: AgentState) -> AgentState:
@@ -285,6 +385,37 @@ Reply with ONLY this JSON object:
         state["p_info"] = setup_model.predict_final(bundle, state["indicators"], state["setup"], state["setup_hard"])
         p = state["p_info"]
         logging.info(f"   [{state['ticker']}] {state['setup']} match {state['setup_match']:.2f} ({p['bucket']}): p(any day)={p['p_any']:.2f}  p(this kind of day)={p['p_group']:.2f}  -> p(final)={p['p_final']:.2f} (evidence {p['setup_trust']:.2f}, model {p['model_trust']:.2f}, validated={p['validated']})")
+        return state
+
+    async def _provisional_signal(self, state: AgentState) -> AgentState:
+        """Fast, LLM-free read of the setup plus the live price/volume reaction."""
+        state["provisional_signal"], state["provisional_detail"] = "", {}
+        ind = state.get("indicators") or {}
+        if not ind or not state.get("setup"):
+            return state
+        out = decision.decide(
+            setup=state.get("setup", ""),
+            p_info=state.get("p_info"),
+            atr_pct=state.get("risk_atr_pct") or ind.get("atr_pct"),
+            last_close=ind.get("Close"),
+            as_of=state.get("as_of"),
+            news=None,
+            params=decision.load_params(),
+            days_to_earn=ind.get("days_to_earn"),
+            match=state.get("setup_match", 1.0),
+            hard=state.get("setup_hard", True),
+            gaps=state.get("setup_gaps"),
+            intraday=not state.get("bar_complete", True),
+            bar_complete=state.get("bar_complete", True),
+            price_reaction=state.get("price_reaction"),
+        )
+        state["provisional_signal"] = out["signal"]
+        state["provisional_detail"] = out["detail"]
+        logging.info(
+            f"   [pre-news] {state['ticker']} {out['signal']} "
+            f"(p={out['confidence']:.2f}, EV={out['score']:+.2f}R, "
+            f"{'live' if not state.get('bar_complete', True) else 'completed bar'})"
+        )
         return state
 
     _SETUP_BRIEF = {
@@ -299,19 +430,60 @@ Reply with ONLY this JSON object:
     }
 
     async def _news_analysis(self, state: AgentState) -> AgentState:
-        """Read the headlines in the context of the best-matching setup, however fully formed it is.
-        Skipped (no LLM call) only when there are no headlines to read, or no data at all."""
+        """Read the headlines in the context of the setup and the live price/volume reaction.
+
+        The deterministic provisional read above is already available here, so the LLM's job is
+        to interpret the news against what price and volume are actually doing. Identical
+        headlines reuse the cached analysis; price ticks do not call the LLM every time.
+        """
         state["news_analysis"], state["sentiment_score"] = None, 0.0
         if not state.get("setup") or not state.get("headlines"):
             return state
+
+        headline_key = f"{state['setup']}|" + "|".join(state.get("headlines") or [])
+        cached = self._news_analysis_cache.get(state["ticker"])
+        if (
+            cached
+            and cached[0] == headline_key
+            and time.time() - cached[2] < cfg.runtime.intraday_cooldown_sec
+        ):
+            state["news_analysis"] = cached[1]
+            state["sentiment_score"] = cached[1]["sentiment"]
+            return state
+
         logging.info(f"   [node] reading news for {state['ticker']} in the context of {state['setup']}...")
         formed = ("fully formed" if state.get("setup_hard") else
                   f"{int(state.get('setup_match', 0) * 100)}% of the way there; still missing: " + ("; ".join(state.get("setup_gaps") or ["nothing specific"])))
-        
+
+        reaction = state.get("price_reaction") or {}
+        if reaction.get("live"):
+            reaction_text = (
+                f"last {reaction.get('last', float('nan')):.2f} "
+                f"({reaction.get('session_move_pct', 0.0):+.2f}% vs prior close), "
+                f"gap {reaction.get('gap_pct', 0.0):+.2f}%, "
+                f"session range position {reaction.get('range_pos', 0.0):.0%}, "
+                f"volume pace {reaction.get('volume_pace', 0.0):.2f}x normal, "
+                f"{reaction.get('session_fraction', 0.0):.0%} of the session elapsed"
+            )
+        else:
+            reaction_text = "no live intraday snapshot; using the last completed session"
+
+        provisional = state.get("provisional_detail") or {}
+        provisional_plan = provisional.get("plan") or {}
+        provisional_text = (
+            f"{state.get('provisional_signal') or 'none'}; "
+            f"EV {provisional.get('ev_R', 'n/a')}R; "
+            f"entry {provisional_plan.get('entry_ref', 'n/a')}, "
+            f"stop {provisional_plan.get('stop', 'n/a')}, "
+            f"target {provisional_plan.get('target', 'n/a')}"
+        )
+
         prompt = f"""
 You are assisting a swing trader looking at {state['ticker']}.
 Closest setup: {self._SETUP_BRIEF[state['setup']]}
 Chart status: the pattern is {formed}.
+Price/volume reaction so far: {reaction_text}.
+Mechanical provisional read: {provisional_text}.
 
 Headlines: {' | '.join(state['headlines'])}
 
@@ -319,18 +491,24 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
 {{"sentiment": <number from -1 (very negative for the stock) to 1 (very positive)>,
  "thesis": "improved" | "intact" | "damaged" | "unclear"   (effect of this news on the company's business outlook),
  "materiality": <number 0 to 1: how much this could lastingly change the outlook; 0 = noise>,
- "reason": "<one short sentence>"}}
+ "reason": "<one short sentence>",
+ "plan": "<one short sentence: act now, wait for confirmation, or avoid>"}}
         """
-        
+
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
         state["news_analysis"] = self._parse_news(self._response_text(response))
         state["sentiment_score"] = state["news_analysis"]["sentiment"]
+        self._news_analysis_cache[state["ticker"]] = (
+            headline_key,
+            state["news_analysis"],
+            time.time(),
+        )
         return state
 
     @staticmethod
     def _parse_news(text: str) -> dict:
         """Parse the model's JSON; fall back to a bare number (sentiment only) if it didn't comply."""
-        out = {"sentiment": 0.0, "thesis": "unclear", "materiality": 0.0, "reason": ""}
+        out = {"sentiment": 0.0, "thesis": "unclear", "materiality": 0.0, "reason": "", "plan": ""}
         m = re.search(r"\{.*\}", text, re.S)
         if m:
             try:
@@ -340,6 +518,7 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
                 th = str(j.get("thesis", "unclear")).lower()
                 out["thesis"] = th if th in ("improved", "intact", "damaged", "unclear") else "unclear"
                 out["reason"] = str(j.get("reason", ""))[:200]
+                out["plan"] = str(j.get("plan", ""))[:200]
                 return out
             except (ValueError, TypeError):
                 pass
@@ -375,7 +554,7 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
         out = decision.decide(
             setup=state.get("setup", ""),
             p_info=state.get("p_info"),
-            atr_pct=ind.get("atr_pct"),
+            atr_pct=state.get("risk_atr_pct") or ind.get("atr_pct"),
             last_close=ind.get("Close"),
             as_of=state.get("as_of"),
             news=state.get("news_analysis"),
@@ -384,8 +563,11 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
             match=state.get("setup_match", 1.0),
             hard=state.get("setup_hard", True),
             gaps=state.get("setup_gaps"),
+            intraday=not state.get("bar_complete", True),
+            bar_complete=state.get("bar_complete", True),
+            price_reaction=state.get("price_reaction"),
         )
-        
+
         state["signal"] = out["signal"]
         state["signal_confidence"] = out["confidence"]
         state["signal_score"] = out["score"]

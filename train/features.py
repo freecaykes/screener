@@ -32,7 +32,7 @@ Feature groups (each has published research behind it, unlike generic oscillator
 """
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -94,6 +94,15 @@ LIVE_PERIOD = "2y"
 
 _EARNINGS_MAX_GAP_DAYS = 120  # quarters are ~91 days apart; a bigger gap means missing data
 
+_NY = ZoneInfo("America/New_York")
+_SESSION_OPEN = time(9, 30)
+_SESSION_CLOSE = time(16, 0)
+
+_DAILY_CACHE: dict[tuple[str, str], tuple[datetime, pd.DataFrame]] = {}
+_EARNINGS_CACHE: dict[str, tuple[object, pd.DatetimeIndex]] = {}
+_INTRADAY_CACHE: dict[tuple[str, str, str], tuple[datetime, pd.DataFrame]] = {}
+_VOLUME_PROFILE_CACHE: dict[tuple[str, int, str], tuple[object, pd.Series]] = {}
+
 
 # ---------------------------------------------------------------------------
 # Data access (identical for training and inference)
@@ -124,6 +133,66 @@ def fetch_history(ticker: str, period: str) -> pd.DataFrame:
         return pd.DataFrame()
     df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
     return _tidy(df)
+
+
+def _ny_now(now: Optional[datetime] = None) -> datetime:
+    now = now or datetime.now(_NY)
+    return now.replace(tzinfo=_NY) if now.tzinfo is None else now.astimezone(_NY)
+
+
+def fetch_history_cached(
+    ticker: str,
+    period: str = LIVE_PERIOD,
+    now: Optional[datetime] = None,
+    max_age_sec: int = 900,
+    force: bool = False,
+) -> pd.DataFrame:
+    """Daily history reused across intraday polls; `force` refreshes after the close."""
+    current = _ny_now(now)
+    key = (ticker, period)
+    cached = _DAILY_CACHE.get(key)
+    if cached and not force and (current - cached[0]).total_seconds() <= max_age_sec:
+        return cached[1].copy()
+    df = fetch_history(ticker, period)
+    _DAILY_CACHE[key] = (current, df)
+    return df.copy()
+
+
+def _tidy_intraday(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.index = pd.DatetimeIndex(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_convert(_NY).tz_localize(None)
+    return df[~df.index.duplicated(keep="last")].sort_index()
+
+
+def fetch_intraday(
+    ticker: str,
+    interval: str = "1m",
+    period: str = "1d",
+    now: Optional[datetime] = None,
+    max_age_sec: int = 20,
+) -> pd.DataFrame:
+    """Intraday OHLCV bars, timezone-naive New York time. Empty frame on failure."""
+    current = _ny_now(now)
+    key = (ticker, interval, period)
+    cached = _INTRADAY_CACHE.get(key)
+    if cached and (current - cached[0]).total_seconds() <= max_age_sec:
+        return cached[1].copy()
+    try:
+        df = yf.Ticker(ticker).history(
+            period=period, interval=interval, auto_adjust=True, prepost=False
+        )
+    except Exception as e:
+        logging.info(f"  {ticker}: intraday fetch failed ({type(e).__name__}: {e})")
+        df = pd.DataFrame()
+    if df is None or df.empty:
+        df = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    else:
+        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+        df = _tidy_intraday(df)
+    _INTRADAY_CACHE[key] = (current, df)
+    return df.copy()
 
 
 def fetch_vix(period: str) -> pd.Series:
@@ -159,8 +228,311 @@ def fetch_earnings_dates(ticker: str, limit: int = 60) -> pd.DatetimeIndex:
         return pd.DatetimeIndex([])
 
 
-_NY = ZoneInfo("America/New_York")
+def fetch_earnings_dates_cached(
+    ticker: str, limit: int = 60, now: Optional[datetime] = None
+) -> pd.DatetimeIndex:
+    """Earnings dates cached for the current New York calendar day."""
+    current = _ny_now(now)
+    cached = _EARNINGS_CACHE.get(ticker)
+    if cached and cached[0] == current.date():
+        return cached[1].copy()
+    dates = fetch_earnings_dates(ticker, limit)
+    _EARNINGS_CACHE[ticker] = (current.date(), dates)
+    return dates.copy()
+
+
 _MARKET_DONE = time(16, 5)  # conservative: early-close days are treated as open until 16:05
+
+
+def _parse_hhmm(value: Optional[str], default: time) -> time:
+    if not value:
+        return default
+    try:
+        hour, minute = (int(part) for part in value.split(":", 1))
+        return time(hour, minute)
+    except (AttributeError, ValueError):
+        return default
+
+
+def _time_minutes(value: time) -> float:
+    return value.hour * 60.0 + value.minute + value.second / 60.0
+
+
+def _interval_minutes(interval: str) -> int:
+    value, unit = interval[:-1], interval[-1:]
+    try:
+        amount = int(value)
+    except ValueError:
+        return 5
+    if unit == "h":
+        return amount * 60
+    if unit == "d":
+        return amount * 390
+    return max(amount, 1)
+
+
+def market_session(
+    now: Optional[datetime] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> dict:
+    """Current US regular-session state and the elapsed fraction of that session."""
+    current = _ny_now(now)
+    opens = _parse_hhmm(start, _SESSION_OPEN)
+    closes = _parse_hhmm(end, _SESSION_CLOSE)
+    trading_day = current.weekday() < 5
+    current_min = _time_minutes(current.time())
+    open_min, close_min = _time_minutes(opens), _time_minutes(closes)
+    total = max(close_min - open_min, 1.0)
+    elapsed = min(max(current_min - open_min, 0.0), total)
+    return {
+        "is_trading_day": trading_day,
+        "is_open": bool(trading_day and open_min <= current_min < close_min),
+        "session_date": current.date().isoformat(),
+        "session_fraction": elapsed / total,
+        "elapsed_minutes": elapsed,
+        "total_minutes": total,
+        "now": current.isoformat(timespec="seconds"),
+    }
+
+
+def _fallback_volume_fraction(now: datetime, start: time, end: time) -> float:
+    open_min, close_min = _time_minutes(start), _time_minutes(end)
+    total = max(close_min - open_min, 1.0)
+    return min(max((_time_minutes(now.time()) - open_min) / total, 0.0), 1.0)
+
+
+def fetch_volume_profile(
+    ticker: str,
+    days: int = 20,
+    interval: str = "5m",
+    now: Optional[datetime] = None,
+) -> pd.Series:
+    """Average cumulative volume fraction by minute of the regular session.
+
+    Index values are minutes since midnight at the END of each intraday bucket, so the
+    current expected fraction can be interpolated without guessing how far into a bar we are.
+    Empty series on failure; callers then fall back to elapsed-session time.
+    """
+    current = _ny_now(now)
+    key = (ticker, days, interval)
+    cached = _VOLUME_PROFILE_CACHE.get(key)
+    if cached and cached[0] == current.date():
+        return cached[1].copy()
+
+    lookback = min(max(days * 3, 10), 60)
+    bars = fetch_intraday(
+        ticker, interval=interval, period=f"{lookback}d", now=current, max_age_sec=3600
+    )
+    if bars.empty:
+        profile = pd.Series(dtype=float)
+    else:
+        bars = bars[bars.index.date < current.date()]
+        bars = bars.between_time(_SESSION_OPEN.strftime("%H:%M"), "15:59")
+        bucket_minutes = _interval_minutes(interval)
+        frames = []
+        for _, day in bars.groupby(bars.index.date):
+            total = float(day["Volume"].sum())
+            if total <= 0:
+                continue
+            frac = day["Volume"].cumsum() / total
+            minutes = [
+                _time_minutes(t) + bucket_minutes for t in day.index.time
+            ]
+            frames.append(pd.Series(frac.to_numpy(), index=minutes))
+        profile = (
+            pd.concat(frames, axis=1).mean(axis=1).sort_index()
+            if frames
+            else pd.Series(dtype=float)
+        )
+        profile = profile[~profile.index.duplicated(keep="last")].clip(0.0, 1.0)
+        if len(profile):
+            profile.iloc[-1] = 1.0
+
+    _VOLUME_PROFILE_CACHE[key] = (current.date(), profile)
+    return profile.copy()
+
+
+def expected_volume_fraction(
+    profile: Optional[pd.Series],
+    now: Optional[datetime] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> float:
+    """Fraction of a normal day's volume expected to have traded by `now`."""
+    current = _ny_now(now)
+    opens = _parse_hhmm(start, _SESSION_OPEN)
+    closes = _parse_hhmm(end, _SESSION_CLOSE)
+    if profile is None or len(profile) == 0:
+        return _fallback_volume_fraction(current, opens, closes)
+    current_min = _time_minutes(current.time())
+    xp = profile.index.to_numpy(float)
+    fp = profile.to_numpy(float)
+    return float(min(max(np.interp(current_min, xp, fp), 0.0), 1.0))
+
+
+def _without_today(prices: pd.DataFrame, session_date: date) -> pd.DataFrame:
+    if prices is None or prices.empty:
+        return prices
+    return prices[prices.index.date != session_date]
+
+
+def build_live_bar(
+    daily: pd.DataFrame,
+    intraday: pd.DataFrame,
+    profile: Optional[pd.Series] = None,
+    now: Optional[datetime] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> tuple[pd.DataFrame, dict]:
+    """Append today's live package as a synthetic daily bar plus a reaction snapshot.
+
+    The synthetic volume is solved so that `rel_volume` in build_features equals the
+    pace-adjusted volume ratio, not the incomplete cumulative volume.
+    """
+    current = _ny_now(now)
+    session_date = current.date()
+    empty_meta = {
+        "bar_complete": False,
+        "as_of_ts": current.isoformat(timespec="seconds"),
+        "session_date": session_date.isoformat(),
+        "live": False,
+    }
+    if daily is None or daily.empty or intraday is None or intraday.empty:
+        return (daily.copy() if daily is not None else pd.DataFrame()), empty_meta
+
+    day = intraday[intraday.index.date == session_date]
+    if day.empty:
+        return daily.copy(), empty_meta
+
+    completed = _without_today(daily, session_date)
+    if completed.empty:
+        return daily.copy(), empty_meta
+
+    snapshot_time = _ny_now(day.index[-1])
+    last = float(day["Close"].iloc[-1])
+    session_open = float(day["Open"].iloc[0])
+    session_high = float(day["High"].max())
+    session_low = float(day["Low"].min())
+    cumulative_volume = float(day["Volume"].sum())
+    prev_close = float(completed["Close"].iloc[-1])
+    expected = expected_volume_fraction(profile, snapshot_time, start, end)
+    expected = min(max(expected, 0.02), 1.0)
+    avg_volume = float(completed["Volume"].tail(20).mean())
+    if not np.isfinite(avg_volume) or avg_volume <= 0:
+        avg_volume = max(cumulative_volume, 1.0)
+    volume_pace = cumulative_volume / (avg_volume * expected)
+
+    prior_19 = float(completed["Volume"].tail(19).sum())
+    pace_for_volume = min(max(volume_pace, 0.0), 19.5)
+    synthetic_volume = (
+        pace_for_volume * prior_19 / max(20.0 - pace_for_volume, 1.0)
+        if prior_19 > 0
+        else avg_volume * volume_pace
+    )
+
+    row = pd.DataFrame(
+        [{
+            "Open": session_open,
+            "High": max(session_high, last),
+            "Low": min(session_low, last),
+            "Close": last,
+            "Volume": max(synthetic_volume, 0.0),
+        }],
+        index=pd.DatetimeIndex([pd.Timestamp(session_date)]),
+    )
+    prices = pd.concat([completed, row]).sort_index()
+    prices = prices[~prices.index.duplicated(keep="last")]
+
+    session_range = max(session_high - session_low, 1e-12)
+    meta = {
+        "bar_complete": False,
+        "as_of_ts": snapshot_time.isoformat(timespec="seconds"),
+        "session_date": session_date.isoformat(),
+        "live": True,
+        "last": last,
+        "prev_close": prev_close,
+        "session_open": session_open,
+        "session_high": session_high,
+        "session_low": session_low,
+        "session_volume": cumulative_volume,
+        "session_move_pct": (last / prev_close - 1.0) * 100.0 if prev_close else 0.0,
+        "gap_pct": (session_open / prev_close - 1.0) * 100.0 if prev_close else 0.0,
+        "range_pos": (last - session_low) / session_range,
+        "session_fraction": expected,
+        "volume_pace": volume_pace,
+        "avg_volume_20d": avg_volume,
+    }
+    return prices, meta
+
+
+def fetch_live_prices(
+    ticker: str,
+    interval: str = "1m",
+    profile_days: int = 20,
+    now: Optional[datetime] = None,
+    force_daily: bool = False,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> tuple[pd.DataFrame, dict]:
+    """Daily history plus a synthetic live bar for `ticker`."""
+    current = _ny_now(now)
+    daily = fetch_history_cached(ticker, LIVE_PERIOD, now=current, force=force_daily)
+    intraday = fetch_intraday(ticker, interval=interval, period="1d", now=current)
+    profile = fetch_volume_profile(ticker, days=profile_days, interval="5m", now=current)
+    return build_live_bar(daily, intraday, profile, now=current, start=start, end=end)
+
+
+def _live_close_series(symbol: str, now: Optional[datetime] = None) -> pd.Series:
+    current = _ny_now(now)
+    daily = fetch_history_cached(symbol, LIVE_PERIOD, now=current)
+    if daily is None or daily.empty:
+        return pd.Series(dtype=float)
+    intraday = fetch_intraday(symbol, interval="1m", period="1d", now=current)
+    series = daily["Close"].copy()
+    if intraday is not None and not intraday.empty:
+        session_date = current.date()
+        day = intraday[intraday.index.date == session_date]
+        if not day.empty:
+            series = series[series.index.date != session_date]
+            series.loc[pd.Timestamp(session_date)] = float(day["Close"].iloc[-1])
+    return series.sort_index()
+
+
+def fetch_vix_live(now: Optional[datetime] = None) -> pd.Series:
+    return _live_close_series("^VIX", now)
+
+
+def fetch_bench_live(ticker: str, now: Optional[datetime] = None) -> pd.Series:
+    return _live_close_series(benchmark_for(ticker), now)
+
+
+def fetch_quote_snapshots(
+    tickers: list[str],
+    interval: str = "1m",
+    profile_days: int = 20,
+    now: Optional[datetime] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> dict[str, dict]:
+    """Live snapshot per ticker for the event-driven price loop."""
+    current = _ny_now(now)
+    out: dict[str, dict] = {}
+    for ticker in tickers:
+        try:
+            _, meta = fetch_live_prices(
+                ticker,
+                interval=interval,
+                profile_days=profile_days,
+                now=current,
+                start=start,
+                end=end,
+            )
+            out[ticker] = meta
+        except Exception as e:
+            logging.info(f"  {ticker}: quote snapshot failed ({type(e).__name__}: {e})")
+            out[ticker] = {"live": False, "as_of_ts": current.isoformat(timespec="seconds")}
+    return out
 
 
 def drop_incomplete_last_bar(prices: pd.DataFrame, now: Optional[datetime] = None) -> pd.DataFrame:

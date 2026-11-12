@@ -47,6 +47,7 @@ PULLBACK_WINDOW = 10
 BREAKOUT_LOOKBACK = 20
 BREAKOUT_MIN_REL_VOLUME = 1.3
 EMA_TOUCH_ATR = 0.25    # "at or below the 21 EMA" tolerance, in ATRs
+PARTIAL_BREAKOUT_BUFFER_ATR = 0.10  # intraday bars need a little room beyond the level
 
 SETUPS = ["pullback_buy", "breakout_buy", "rally_sell", "breakdown_sell"]
 
@@ -107,6 +108,7 @@ def build_setup_table(
     vix: Optional[pd.Series],
     bench: Optional[pd.Series],
     earnings: Optional[pd.DatetimeIndex] = None,
+    bar_complete: bool = True,
 ) -> pd.DataFrame:
     """One row per usable date: Close, setup, hard, + SETUP_FEATURES + COMPONENT_COLS.
 
@@ -149,12 +151,13 @@ def build_setup_table(
     stab_dn = prev_up & (close < open_) & (close_pos <= 0.5)
 
     rel_vol = feats["rel_volume"].reindex(close.index)
-    # ---- the strict ("hard") rules: authoritative, unchanged ----
+    bo_buffer = 0.0 if bar_complete else PARTIAL_BREAKOUT_BUFFER_ATR
+    # ---- the strict ("hard") rules: authoritative, unchanged for completed bars ----
     hard = np.column_stack([
         (up_trend & (down_depth >= PULLBACK_MIN_ATR) & (ema21_gap >= -EMA_TOUCH_ATR) & stab_up).to_numpy(),
-        ((bo_up > 0) & (rel_vol >= BREAKOUT_MIN_REL_VOLUME) & (close > ema50)).to_numpy(),
+        ((bo_up > bo_buffer) & (rel_vol >= BREAKOUT_MIN_REL_VOLUME) & (close > ema50)).to_numpy(),
         (down_trend & (up_height >= PULLBACK_MIN_ATR) & (ema21_gap <= EMA_TOUCH_ATR) & stab_dn).to_numpy(),
-        ((bo_dn > 0) & (rel_vol >= BREAKOUT_MIN_REL_VOLUME) & (close < ema50)).to_numpy(),
+        ((bo_dn > bo_buffer) & (rel_vol >= BREAKOUT_MIN_REL_VOLUME) & (close < ema50)).to_numpy(),
     ]).astype(bool)
 
     # ---- graded components: each is exactly 1.0 when its condition is met, smaller as it is missed ----
@@ -222,6 +225,22 @@ def build_setup_table(
 
     t = t.reindex(feats.index).replace([np.inf, -np.inf], np.nan)
     return t[cols].dropna(subset=["Close"] + REQUIRED_SETUP_FEATURES)
+
+
+def build_live_setup_table(
+    prices: pd.DataFrame,
+    vix: Optional[pd.Series],
+    bench: Optional[pd.Series],
+    earnings: Optional[pd.DatetimeIndex] = None,
+) -> pd.DataFrame:
+    """Setup table for a session still in progress: hard rules may be met so far, not confirmed."""
+    table = build_setup_table(prices, vix, bench, earnings, bar_complete=False)
+    if table.empty:
+        return table
+    table = table.copy()
+    table["bar_complete"] = False
+    table["confirmed"] = False
+    return table
 
 
 def describe_gaps(row, setup: str) -> list[str]:

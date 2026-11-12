@@ -17,8 +17,9 @@
 #   make docker-clean   - remove container + image (keeps the data volume)
 #   make docker-purge   - also delete the data volume (model + logs)
 #   make docker-window  - run now, auto-stop at STOP_AT (default 15:00)
-#   make docker-cron    - show the weekday 05:00-15:00 crontab line
-#   make docker-cron-install / docker-cron-remove - manage that crontab entry
+#   make docker-cron    - show the weekday 05:00-15:00 crontab lines
+#   make docker-cron-install / docker-cron-remove - manage those crontab entries
+#   make cron-remove   - alias for docker-cron-remove
 #
 # The container loads .env via --env-file and mounts config/config.toml
 # read-only at /config/config.toml (SCREENER_CONFIG). Override with:
@@ -41,6 +42,7 @@ DOCKER_CONTAINER ?= screener
 DOCKER_VOLUME    ?= screener-data
 ENV_FILE         ?= .env
 CONFIG_FILE      ?= config/config.toml
+START_AT         ?= 05:00
 STOP_AT          ?= 15:00
 CRON_LOG         ?= screener-cron.log
 
@@ -54,7 +56,7 @@ DOCKER_COMMON      = --init $(DOCKER_ENV_ARGS) $(DOCKER_CONFIG_ARGS) $(DOCKER_ST
 .PHONY: all build run clean rebuild shell freeze venv \
         docker-build docker-check-config docker-run docker-up docker-logs \
         docker-down docker-shell docker-clean docker-purge docker-window \
-        docker-cron docker-cron-install docker-cron-remove
+        docker-cron docker-cron-install docker-cron-remove cron-remove
 
 all: build
 
@@ -134,22 +136,28 @@ docker-purge: docker-clean
 # The script builds the image only if it is missing, then stops the container
 # at STOP_AT.
 docker-window: docker-check-config
-	STOP_AT=$(STOP_AT) ./scripts/docker-window.sh
+	START_AT=$(START_AT) STOP_AT=$(STOP_AT) ./scripts/docker-window.sh
 
 # Weekdays only (Mon-Fri). Times use the host's local timezone unless the
 # crontab sets CRON_TZ/TZ. The script stops the container at STOP_AT.
+# The @reboot entry catches up a 05:00 start that was missed because the host
+# was off or still booting (CATCH_UP waits for START_AT when booted earlier).
 docker-cron:
-	@echo "Add this line with 'crontab -e' (weekdays, host local time):"
-	@echo "0 5 * * 1-5 STOP_AT=$(STOP_AT) '$(abspath scripts/docker-window.sh)' >> '$(abspath $(CRON_LOG))' 2>&1"
+	@echo "Add these lines with 'crontab -e' (weekdays, host local time):"
+	@echo "0 5 * * 1-5 START_AT=$(START_AT) STOP_AT=$(STOP_AT) '$(abspath scripts/docker-window.sh)' >> '$(abspath $(CRON_LOG))' 2>&1"
+	@echo "@reboot CATCH_UP=1 START_AT=$(START_AT) STOP_AT=$(STOP_AT) '$(abspath scripts/docker-window.sh)' >> '$(abspath $(CRON_LOG))' 2>&1"
 
 docker-cron-install:
 	@( crontab -l 2>/dev/null | grep -vF 'scripts/docker-window.sh' || true; \
-	   echo "0 5 * * 1-5 STOP_AT=$(STOP_AT) '$(abspath scripts/docker-window.sh)' >> '$(abspath $(CRON_LOG))' 2>&1" ) | crontab -
-	@echo "Installed: weekdays 05:00-$(STOP_AT), logging to $(abspath $(CRON_LOG))"
+	   echo "0 5 * * 1-5 START_AT=$(START_AT) STOP_AT=$(STOP_AT) '$(abspath scripts/docker-window.sh)' >> '$(abspath $(CRON_LOG))' 2>&1"; \
+	   echo "@reboot CATCH_UP=1 START_AT=$(START_AT) STOP_AT=$(STOP_AT) '$(abspath scripts/docker-window.sh)' >> '$(abspath $(CRON_LOG))' 2>&1" ) | crontab -
+	@echo "Installed: weekdays 05:00-$(STOP_AT) plus @reboot catch-up, logging to $(abspath $(CRON_LOG))"
 
 docker-cron-remove:
 	@( crontab -l 2>/dev/null | grep -vF 'scripts/docker-window.sh' || true ) | crontab -
 	@echo "Removed the screener window entry from crontab"
+
+cron-remove: docker-cron-remove
 
 # ---- teardown -------------------------------------------------------------
 clean:

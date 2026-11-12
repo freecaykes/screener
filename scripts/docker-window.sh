@@ -2,7 +2,13 @@
 # Run the screener container for a daily window: start now, stop at STOP_AT.
 #
 # Intended for cron, e.g. a weekday 05:00-15:00 local-time window:
-#   0 5 * * 1-5 STOP_AT=15:00 /path/to/repo/scripts/docker-window.sh >> /path/to/screener-cron.log 2>&1
+#   0 5 * * 1-5 START_AT=05:00 STOP_AT=15:00 /path/to/repo/scripts/docker-window.sh >> /path/to/screener-cron.log 2>&1
+#   @reboot CATCH_UP=1 START_AT=05:00 STOP_AT=15:00 /path/to/repo/scripts/docker-window.sh >> /path/to/screener-cron.log 2>&1
+#
+# The @reboot entry makes up for a missed 05:00 start when the host was off or
+# still booting at that time (CATCH_UP waits until START_AT if booted earlier,
+# and is a no-op on weekends or after STOP_AT). A file lock keeps the 05:00
+# and @reboot entries from starting two windows at once.
 #
 # The script starts the container detached (so crashes restart during the
 # window), waits until STOP_AT, then stops and removes it. State stays in the
@@ -15,9 +21,24 @@ export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 REPO_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd)"
 cd "$REPO_DIR"
 
+START_AT="${START_AT:-05:00}"
 STOP_AT="${STOP_AT:-15:00}"
-if [[ ! "$STOP_AT" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
-    echo "STOP_AT must be HH:MM in 24-hour time (got '$STOP_AT')" >&2
+CATCH_UP="${CATCH_UP:-0}"
+
+for value in "$START_AT" "$STOP_AT"; do
+    if [[ ! "$value" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+        echo "START_AT/STOP_AT must be HH:MM in 24-hour time (got '$value')" >&2
+        exit 2
+    fi
+done
+
+to_minutes() {
+    local h="${1%%:*}" m="${1##*:}"
+    printf '%s\n' "$((10#$h * 60 + 10#$m))"
+}
+
+if (( $(to_minutes "$START_AT") >= $(to_minutes "$STOP_AT") )); then
+    echo "START_AT ($START_AT) must be earlier than STOP_AT ($STOP_AT)" >&2
     exit 2
 fi
 
@@ -32,6 +53,20 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "config file not found: $CONFIG_FILE" >&2
     exit 1
 fi
+
+# Only one window at a time: the 05:00 cron entry and an @reboot catch-up can
+# otherwise race when the host boots right around the scheduled start.
+LOCK_FILE="${LOCK_FILE:-${TMPDIR:-/tmp}/screener-docker-window.lock}"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "another screener window already holds $LOCK_FILE; exiting" >&2
+    exit 0
+fi
+
+# Epoch of today's START_AT/STOP_AT.
+start_epoch() {
+    date -d "today ${START_AT}" +%s
+}
 
 # Epoch of today's STOP_AT. Fails when the stop time has already passed.
 stop_epoch() {
@@ -59,6 +94,23 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 0' INT TERM HUP
+
+# Catch-up mode (used by the @reboot cron entry): if the host booted before
+# START_AT, wait for it instead of starting early; skip weekends and days
+# whose window has already closed.
+if [[ "$CATCH_UP" == "1" ]]; then
+    if (( $(date +%u) > 5 )); then
+        echo "weekend; no weekday window to catch up" >&2
+        exit 0
+    fi
+    now=$(date +%s)
+    start=$(start_epoch)
+    if (( now < start )); then
+        delay=$(( start - now ))
+        echo "catch-up: waiting ${delay}s until START_AT ${START_AT}"
+        sleep "$delay"
+    fi
+fi
 
 if (( $(remaining_seconds) <= 0 )); then
     echo "STOP_AT ${STOP_AT} has already passed today; not starting" >&2

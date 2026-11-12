@@ -2,7 +2,7 @@
 # Secrets (the API key) do NOT go here: put them in .env and name the variable below.
 
 [general]
-tickers = ["CELH", "SOFI", "UBER", "AVGO", "NVDA"]
+tickers = ["CELH", "NBIS", "UBER", "AVGO", "NVDA"]
 logging_level = "INFO"
 notification_host="https://ntfy.sh"
 notification_topic="screener-alerts-xk7k2q9"
@@ -20,3 +20,7 @@ provider = "google"
 model = "gemini-3.5-flash-lite"
 temperature = 0.0
 api_key_env = "API_KEY"        # name of the env var / .env entry holding the key
+
+[signals]
+min_ev_r = 0.05
+

@@ -125,7 +125,7 @@ class TickerAgent:
         initial_state: AgentState = {"ticker": ticker, "trigger": trigger}
         try:
             result = await self.app.ainvoke(initial_state)
-            logging.info(f"🏁 Finished agent for {ticker}.")
+            logging.info(f"Finished agent for {ticker}.")
             return result
         except Exception as e:
             logging.error(f"Error in TickerAgent.run for {ticker}: {e}")
@@ -173,11 +173,12 @@ class TickerAgent:
         if not headlines:
             return state
 
-        logging.info(
+        logging.debug(
             f"   [node] checking whether the headline is price-relevant for {state['ticker']}..."
         )
         headline_text = "\n".join(f"- {h}" for h in headlines)
-        prompt = f"""You are screening news for a swing-trading screener.
+        prompt = f"""
+You are screening news for a swing-trading screener.
 Ticker: {state['ticker']}
 
 Headlines:
@@ -185,7 +186,8 @@ Headlines:
 
 State the relevancy if this news could plausibly affect {state['ticker']}'s price
 Reply with ONLY this JSON object:
-{{"relevant": <true or false>, "reason": "<one short sentence>"}}"""
+{{"relevant": <true or false>, "reason": "<one short sentence>"}}
+        """
         try:
             response = await self.llm.ainvoke([HumanMessage(content=prompt)])
         except Exception as e:
@@ -305,7 +307,9 @@ Reply with ONLY this JSON object:
         logging.info(f"   [node] reading news for {state['ticker']} in the context of {state['setup']}...")
         formed = ("fully formed" if state.get("setup_hard") else
                   f"{int(state.get('setup_match', 0) * 100)}% of the way there; still missing: " + ("; ".join(state.get("setup_gaps") or ["nothing specific"])))
-        prompt = f"""You are assisting a swing trader looking at {state['ticker']}.
+        
+        prompt = f"""
+You are assisting a swing trader looking at {state['ticker']}.
 Closest setup: {self._SETUP_BRIEF[state['setup']]}
 Chart status: the pattern is {formed}.
 
@@ -315,7 +319,9 @@ Reply with ONLY the following JSON object, if there are no headlines provided, g
 {{"sentiment": <number from -1 (very negative for the stock) to 1 (very positive)>,
  "thesis": "improved" | "intact" | "damaged" | "unclear"   (effect of this news on the company's business outlook),
  "materiality": <number 0 to 1: how much this could lastingly change the outlook; 0 = noise>,
- "reason": "<one short sentence>"}}"""
+ "reason": "<one short sentence>"}}
+        """
+        
         response = await self.llm.ainvoke([HumanMessage(content=prompt)])
         state["news_analysis"] = self._parse_news(self._response_text(response))
         state["sentiment_score"] = state["news_analysis"]["sentiment"]

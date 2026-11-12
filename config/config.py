@@ -58,7 +58,7 @@ class GeneralConfig:
     def __post_init__(self) -> None:
         if not self.tickers or not all(isinstance(t, str) and t for t in self.tickers):
             raise ValueError("general.tickers must be a non-empty list of strings")
-            
+
         logging.basicConfig(
             level=self.logging_level.upper(),
             format='%(asctime)s,%(msecs)03d %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s',
@@ -82,7 +82,7 @@ class RuntimeConfig:
 @dataclass(frozen=True)
 class LLMConfig:
     provider: str = "google"
-    model: str = "gemini-3.6-flash"
+    model: str = "gemini-3.5-flash-lite"
     temperature: float = 0.0
     api_key_env: str = ""
 
@@ -166,6 +166,18 @@ class XGBoostConfig:
             "n_jobs": self.n_jobs,
         }
 
+@dataclass(frozen=True)
+class SignalConfig:
+    require_validation: bool = True
+    min_ev_r: float = 0.15                # need >= this expected R per trade after costs
+    strong_ev_r: float = 0.5
+    min_confidence: float = 0.28
+    earnings_blackout_cal_days: int = 14  # ~ the hold window: don't hold through earnings (relax if you want to)
+
+    def __post_init__(self) -> None:
+        for name in ("min_ev_r", "strong_ev_r", "earnings_blackout_cal_days", "min_confidence"):
+            if getattr(self, name) < 0:
+                raise ValueError("signal.{name} must be >= 0")
 
 @dataclass(frozen=True)
 class Config:
@@ -174,6 +186,7 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     indicators: IndicatorsConfig = field(default_factory=IndicatorsConfig)
     xgboost: XGBoostConfig = field(default_factory=XGBoostConfig)
+    signals: SignalConfig = field(default_factory=SignalConfig)
 
 
 def _build(cls: type[T], raw: dict[str, Any], path: str = "") -> T:
@@ -202,7 +215,6 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     with config_path.open("rb") as fh:
         raw = tomllib.load(fh)
     
-
     return _build(Config, raw)
 
 @lru_cache(maxsize=1)

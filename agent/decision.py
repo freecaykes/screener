@@ -18,12 +18,12 @@ is anchored on what days with that setup AND that level of match have actually d
                         gamma starts from a weak prior and is learned from this agent's own logged calls
                         once their stop/target outcomes are known (refit_news).
   EV        = p * (TP/SL) + (1 - p) * avg_nonwin_R - cost_R        (in R = units of the stop distance)
-  signal    = BUY/SELL when EV >= MIN_EV_R and the setup is validated; STRONG when EV >= STRONG_EV_R.
+  signal    = BUY/SELL when EV >= cfg.signals.min_ev_r and the setup is validated; STRONG when EV >= cfg.signals.strong_ev_r.
 
 "Validated" means a setup has out-of-sample evidence behind it: either the rule beat entering on a random
 day, or the model ranked outcomes within the setup (train/setup_model.py). Without that the setup is still
 REPORTED (with its stop, target and time limit, as a watch-list alert) but the signal stays HOLD.
-Set REQUIRE_VALIDATION = False to act on unvalidated setups -- then you are relying on rules and
+Set cfg.signals.require_validation = False to act on unvalidated setups -- then you are relying on rules and
 history that may owe their record to hindsight selection of the tickers.
 
 decide() is pure (no I/O) so it can be unit-tested and replayed in a backtest.
@@ -40,15 +40,15 @@ import numpy as np
 import pandas as pd
 
 from train import features, setups
+from config import get_config
+
+cfg = get_config()
+
 
 LOG_PATH = "signal_log.jsonl"
 PARAMS_PATH = "decision_params.json"
 
 # ---- decision policy: risk appetite, not predictions -----------------------------
-MIN_EV_R = 0.15                   # need >= this expected R per trade after costs
-STRONG_EV_R = 0.50
-EARNINGS_BLACKOUT_CAL_DAYS = 14   # ~ the hold window: don't hold through earnings (relax if you want to)
-REQUIRE_VALIDATION = True
 VETO_MATERIALITY = 0.6            # news must be at least this material to veto a trade
 
 # ---- prior for the news weight (log-odds shift per +1.0 of aligned news strength) --
@@ -142,7 +142,7 @@ def decide(
         log_fields = {"p_pre_news": round(float(p_info["p_final"]), 3), "news": news,
                       "news_strength": round(eff["strength"], 3), "ev_R": None}
 
-    if days_to_earn is not None and np.isfinite(days_to_earn) and 0 <= days_to_earn <= EARNINGS_BLACKOUT_CAL_DAYS:
+    if days_to_earn is not None and np.isfinite(days_to_earn) and 0 <= days_to_earn <= cfg.signals.earnings_blackout_cal_days:
         return _hold(f"earnings in {days_to_earn:.0f} day(s): inside the {setups.MAX_HOLD}-bar hold window", **base, **log_fields, watch=alert)
     if p_info is None:
         return _hold("setup active but no model/evidence available", **base, watch=alert)
@@ -155,7 +155,7 @@ def decide(
     cost_r = setups.COST_PCT / (setups.SL_ATR * atr_pct)
     r_nw = float(p_info.get("r_nonwin", -1.0))
     ev = p * rr + (1 - p) * r_nw - cost_r
-    validated = bool(p_info.get("validated", False)) or not REQUIRE_VALIDATION
+    validated = bool(p_info.get("validated", False)) or not cfg.signals.require_validation
 
     detail = {
         **base,
@@ -170,14 +170,14 @@ def decide(
         "validated": validated, "watch": False,
     }
 
-    if ev >= MIN_EV_R and validated:
-        strong = ev >= STRONG_EV_R
+    if ev >= cfg.signals.min_ev_r and p >= cfg.signals.min_confidence and validated:
+        strong = ev >= cfg.signals.strong_ev_r
         label = ("STRONG_" if strong else "") + ("BUY" if d > 0 else "SELL")
         return {"signal": label, "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 
     form = "fully formed" if hard else f"{int(match * 100)}% formed ({bucket})"
     why = (f"{setup} {form}, but this kind of day is not validated out-of-sample (evidence too thin to act on)" if not validated
-           else f"expected value {ev:+.2f}R is below the {MIN_EV_R}R bar")
+           else f"expected value {ev:+.2f}R is below the {cfg.signals.min_ev_r}R bar")
     detail.update(reason=why, watch=alert)
     return {"signal": "HOLD", "confidence": round(p, 3), "score": round(ev, 3), "detail": detail}
 

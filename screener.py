@@ -67,7 +67,7 @@ def print_result(ticker: str, result: dict) -> None:
     ind = result.get("indicators") or {}
     d = result.get("signal_detail") or {}
     logging.info(f"{ticker} @ {time.strftime('%H:%M:%S')} (last completed session: {result.get('as_of', 'n/a')}), vs {result.get('benchmark', 'benchmark')})")
-    logging.info(f"   Headline : {' | '.join(result.get('headlines') or ['(none)'])[:100]}")
+    logging.info(f"   Headline : {' | '.join(result.get('headlines') or ['(none)'])}")
     dte = ind.get("days_to_earn")
     if dte is not None and math.isfinite(dte):
         logging.info(f"   Earnings : next in {dte:.0f} day(s)")
